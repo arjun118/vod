@@ -13,6 +13,7 @@ import (
 	"github.com/arjun118/fileupload/internal/handlers"
 	"github.com/arjun118/fileupload/internal/media/delivery"
 	"github.com/arjun118/fileupload/internal/media/minio"
+	mid "github.com/arjun118/fileupload/internal/middleware"
 	"github.com/arjun118/fileupload/service"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -42,8 +43,13 @@ func main() {
 	videoService := service.NewVideoService(storageProvider, deliverProvider, 3, "minio")
 	videoHandler := handlers.NewVideoHandler(videoService)
 	r := chi.NewRouter()
+	r.Use(mid.Authenticate)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("alive\n"))
+	})
 	r.Route("/api/videos", func(r chi.Router) {
 		r.Post("/", videoHandler.Upload)   // POST /api/videos
 		r.Get("/url", videoHandler.GetURL) // GET /api/videos/url?key=...
@@ -56,7 +62,6 @@ func main() {
 	// workDir, _ := os.Getwd()
 	// filesDir := http.Dir(filepath.Join(workDir, "storage"))
 	// r.Handle("/media/*", http.StripPrefix("/media", http.FileServer(filesDir)))
-
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: r,

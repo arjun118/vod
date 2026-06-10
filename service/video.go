@@ -28,15 +28,17 @@ type VideoService struct {
 	jobQueue   chan TranscodeJob
 	workerWg   sync.WaitGroup
 	maxWorkers int
+	Provider   string
 }
 
-func NewVideoService(storage media.StorageProvider, delivery media.DeliveryProvider, maxWorkers int) *VideoService {
+func NewVideoService(storage media.StorageProvider, delivery media.DeliveryProvider, maxWorkers int, provider string) *VideoService {
 	svc := &VideoService{
 		storage:  storage,
 		delivery: delivery,
 		//buffer size for queued jobs
 		jobQueue:   make(chan TranscodeJob, 100),
 		maxWorkers: maxWorkers,
+		Provider:   provider,
 	}
 	svc.StartWorkerPool()
 	return svc
@@ -184,7 +186,7 @@ func (v *VideoService) Upload(ctx context.Context, file io.Reader, meta media.Fi
 	return &media.MediaObject{
 		ID:          videoID,
 		ObjectKey:   playlistKey,
-		Provider:    "local",
+		Provider:    v.Provider,
 		ContentType: "application/vnd.apple.mpegurl",
 		Size:        size,
 		PlaybackURL: playBackURL,

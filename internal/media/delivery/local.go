@@ -6,20 +6,20 @@ import (
 	"strings"
 )
 
-type Delivery struct {
+type LocalDelivery struct {
 	BaseURL string
 }
 
-func NewDelivery(baseURL string) *Delivery {
-	return &Delivery{
+func NewLocalDelivery(baseURL string) *LocalDelivery {
+	return &LocalDelivery{
 		BaseURL: baseURL,
 	}
 }
 
-func (d *Delivery) URL(ctx context.Context, objectKey string) (string, error) {
+func (d *LocalDelivery) URL(ctx context.Context, objectKey string) (string, error) {
 	return d.playbackURL(objectKey), nil
 }
 
-func (d *Delivery) playbackURL(objectKey string) string {
+func (d *LocalDelivery) playbackURL(objectKey string) string {
 	return fmt.Sprintf("%s/%s", strings.TrimRight(d.BaseURL, "/"), objectKey)
 }

@@ -2,32 +2,44 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/arjun118/fileupload/internal/handlers"
 	"github.com/arjun118/fileupload/internal/media/delivery"
-	"github.com/arjun118/fileupload/internal/media/local"
+	"github.com/arjun118/fileupload/internal/media/minio"
 	"github.com/arjun118/fileupload/service"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	miniosdk "github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 func main() {
-	// a post handler to upload
-	// a get handler to view the video
-	// a delte handler to handle the delete
-	// a fileserver to see all the videos if that is possible with all the other routes
-	// r.Handle("/*", http.FileServer(http.Dir("./")))
-	storageDir := "./storage"
-	storageProvider := local.NewStorage(storageDir)
-	deliverProvider := delivery.NewDelivery("http://localhost:8080/media")
-	videoService := service.NewVideoService(storageProvider, deliverProvider, 3)
+	bucketName := "storage"
+	endpoint := "localhost:9000"
+	accessKeyID := "adminpass"
+	secretAccessKey := "adminpass"
+	useSSL := false
+	minioClient, err := miniosdk.New(endpoint, &miniosdk.Options{
+		Creds:  credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
+		Secure: useSSL,
+	})
+	if err != nil {
+		log.Fatalln(err)
+	}
+	fmt.Println("connected to minio successfully")
+	storageProvider := minio.NewStorage(minioClient, bucketName)
+	if err := storageProvider.EnsureBucket(context.Background()); err != nil {
+		log.Fatalf("failed to initialze storage bucket: %w", err)
+	}
+	deliverProvider := delivery.NewMinioDelivery(bucketName, endpoint)
+	videoService := service.NewVideoService(storageProvider, deliverProvider, 3, "minio")
 	videoHandler := handlers.NewVideoHandler(videoService)
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -37,9 +49,9 @@ func main() {
 		r.Get("/url", videoHandler.GetURL) // GET /api/videos/url?key=...
 		r.Delete("/", videoHandler.Delete) // DELETE /api/videos?key=...
 	})
-	workDir, _ := os.Getwd()
-	filesDir := http.Dir(filepath.Join(workDir, "storage"))
-	r.Handle("/media/*", http.StripPrefix("/media", http.FileServer(filesDir)))
+	// workDir, _ := os.Getwd()
+	// filesDir := http.Dir(filepath.Join(workDir, "storage"))
+	// r.Handle("/media/*", http.StripPrefix("/media", http.FileServer(filesDir)))
 
 	server := &http.Server{
 		Addr:    ":8080",

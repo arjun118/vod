@@ -36,9 +36,9 @@ func main() {
 	fmt.Println("connected to minio successfully")
 	storageProvider := minio.NewStorage(minioClient, bucketName)
 	if err := storageProvider.EnsureBucket(context.Background()); err != nil {
-		log.Fatalf("failed to initialze storage bucket: %w", err)
+		log.Fatalf("failed to initialze storage bucket: %v", err)
 	}
-	deliverProvider := delivery.NewMinioDelivery(bucketName, endpoint)
+	deliverProvider := delivery.NewMinioDelivery(bucketName, "localhost:8080/media")
 	videoService := service.NewVideoService(storageProvider, deliverProvider, 3, "minio")
 	videoHandler := handlers.NewVideoHandler(videoService)
 	r := chi.NewRouter()
@@ -48,6 +48,10 @@ func main() {
 		r.Post("/", videoHandler.Upload)   // POST /api/videos
 		r.Get("/url", videoHandler.GetURL) // GET /api/videos/url?key=...
 		r.Delete("/", videoHandler.Delete) // DELETE /api/videos?key=...
+	})
+	r.Handle("/media/*", &handlers.ProxyHandler{
+		MinioClient: minioClient,
+		BucketName:  bucketName,
 	})
 	// workDir, _ := os.Getwd()
 	// filesDir := http.Dir(filepath.Join(workDir, "storage"))

@@ -23,7 +23,7 @@ import (
 
 func main() {
 	bucketName := "storage"
-	endpoint := "localhost:9000"
+	endpoint := "minio:9000"
 	accessKeyID := "adminpass"
 	secretAccessKey := "adminpass"
 	useSSL := false
@@ -36,9 +36,26 @@ func main() {
 	}
 	fmt.Println("connected to minio successfully")
 	storageProvider := minio.NewStorage(minioClient, bucketName)
-	if err := storageProvider.EnsureBucket(context.Background()); err != nil {
-		log.Fatalf("failed to initialze storage bucket: %v", err)
+
+	for i := 0; i < 30; i++ {
+
+		err = storageProvider.EnsureBucket(context.Background())
+
+		if err == nil {
+			break
+		}
+
+		log.Printf("waiting for minio (%d/30): %v", i+1, err)
+
+		time.Sleep(2 * time.Second)
 	}
+
+	if err != nil {
+		log.Fatalf("failed to initialize bucket: %v", err)
+	} else {
+		log.Println("ensured bucket...")
+	}
+
 	deliverProvider := delivery.NewMinioDelivery(bucketName, "localhost:8080/media")
 	videoService := service.NewVideoService(storageProvider, deliverProvider, 3, "minio")
 	videoHandler := handlers.NewVideoHandler(videoService)

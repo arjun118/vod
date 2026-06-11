@@ -38,8 +38,29 @@ func (s *Storage) EnsureBucket(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to create bucket: %w", err)
 		}
+		publicPolicy := fmt.Sprintf(`{
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Sid": "PublicRead",
+                    "Principal": {"AWS": ["*"]},
+                    "Action": ["s3:GetObject"],
+                    "Resource": ["arn:aws:s3:::%s/*"]
+                }
+            ]
+        }`, s.BucketName)
+
+		log.Println("Configuring public read policy for bucket:", s.BucketName)
+		if err = s.Client.SetBucketPolicy(ctx, s.BucketName, publicPolicy); err !=
+			nil {
+			return fmt.Errorf("failed to set public policy: %w", err)
+		}
 	}
+	//if bucket already exists we just skip it - dont make any changes to the policy
+
 	//you might want to configure cors rules for your bucket while using the backend with a frontend
+
 	return nil
 }
 

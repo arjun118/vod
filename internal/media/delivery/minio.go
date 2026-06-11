@@ -24,7 +24,7 @@ func (m *MinioDelivery) URL(ctx context.Context, objectKey string) (string, erro
 }
 
 func (m *MinioDelivery) playbackURL(objectKey string) string {
-	url := fmt.Sprintf("http://%s/%s", strings.TrimRight(m.EndPoint, "/"), objectKey)
+	url := fmt.Sprintf("http://%s/%s/%s", strings.TrimRight(m.EndPoint, "/"), m.BucketName, objectKey)
 	log.Println("playback url called with objectkey: ", objectKey, "url: ", url)
 	return url
 }

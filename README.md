@@ -206,7 +206,7 @@ Everything remains the same from the previous method - nginx cache method. the c
 
 ## change in nginx config
 
-1. we add an internal vritual host `/_protected/` and direct our `/media/` route to our go backed for authentication
+1. we add an internal location block `/_protected/` for protected media delivery and configure the public  `/media/` location-block to proxy requests to go backed for authentication and authorization
 
 ```nginx
  location /media/{

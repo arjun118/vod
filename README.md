@@ -189,12 +189,83 @@ now after 24 hrs , when the file is accesed again
 
 nginx sends to minio
 
-```bash
+ ```bash
 GET /storage/foo.ts
 
 If-None-Match: abc123
-```
+ ```
 
 >  minio response: 304 Not Modified
 
 > nginx: keep exisiting file, refresh metadata
+
+
+----
+
+Everything remains the same from the previous method - nginx cache method. the changes are below
+
+## change in nginx config
+
+1. we add an internal vritual host `/_protected/` and direct our `/media/` route to our go backed for authentication
+
+```nginx
+ location /media/{
+        # this will be a validating/auth backend now
+        # responds with x-accel-redirect header for nginx to know
+        # that the request is valid and it can serve the file
+            proxy_pass http://backend:8080;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+```
+
+```nginx
+location /_protected/ {
+
+            internal;
+
+            proxy_cache hls_cache;
+
+            proxy_cache_key "$scheme$proxy_host$uri";
+
+            proxy_ignore_headers Cache-Control Expires Set-Cookie;
+
+            proxy_cache_valid 200 24h;
+            proxy_cache_valid 206 24h;
+
+            proxy_cache_use_stale
+                error
+                timeout
+                http_500
+                http_502
+                http_503
+                http_504;
+
+            proxy_cache_background_update on;
+            proxy_cache_lock on;
+            proxy_cache_lock_timeout 10s;
+
+            proxy_force_ranges on;
+
+            add_header X-Cache-Status $upstream_cache_status always;
+            add_header X-Debug-Uri $uri always;
+
+
+            proxy_pass http://minio:9000/;
+        }
+```
+
+## code changes
+
+1. we seperate our token authentication - which our general access and cookie authentication - specifically to validate media access 
+2. `/api/videos/auth-cookie` - just returns a cookie now, in real use cases - you might want to check the user's permissions to view the video and return a token or deny access
+
+## media url ==  exact object key?
+
+1. yes, for now. since we dont have any database stuff going on here to map `media/videos/123` to `storage/videos/26/06/object_key`. if you integrate some db , you can easily map and rewrite the `X-Accel-Redirect` path to your object storage url.
+2. this time we also hid our bucket name in the request - since we generate the path that nginx needs to fetch
+
+
+----
+
+# TODO: will add a flow diagram on how the request lifecycle

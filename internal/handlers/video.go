@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/arjun118/fileupload/internal/media"
 	"github.com/arjun118/fileupload/service"
@@ -76,4 +77,22 @@ func (h *VideoHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status": "deleted"}\n`))
+}
+
+func (h *VideoHandler) GetAuthCookie(w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	token = strings.TrimSpace(token)
+	http.SetCookie(w, &http.Cookie{
+		Name:     "media_access",
+		Value:    token,
+		Path:     "/media/",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   7200, // 2 hours
+	})
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("cookie issued"))
 }

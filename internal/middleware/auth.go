@@ -20,7 +20,7 @@ func writeJson(w http.ResponseWriter, status int, data any, headers http.Header)
 	return nil
 }
 
-func Authenticate(next http.Handler) http.Handler {
+func TokenAuthenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		parts := strings.SplitN(authHeader, " ", 2)
@@ -34,10 +34,28 @@ func Authenticate(next http.Handler) http.Handler {
 			return
 		}
 
-		if parts[1] != "secret" {
+		if parts[1] != "supersecret" {
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func CookieAuthenticate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Read token from cookie
+		cookie, err := r.Cookie("media_access")
+		if err != nil {
+			http.Error(w, "missing auth cookie", http.StatusUnauthorized)
+			return
+		}
+
+		if cookie.Value != "supersecret" {
+			http.Error(w, "invalid token in cookie", http.StatusUnauthorized)
+			return
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }

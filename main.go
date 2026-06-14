@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,7 +12,7 @@ import (
 	"github.com/arjun118/fileupload/internal/handlers"
 	"github.com/arjun118/fileupload/internal/media/delivery"
 	"github.com/arjun118/fileupload/internal/media/minio"
-	mid "github.com/arjun118/fileupload/internal/middleware"
+	routingmiddleware "github.com/arjun118/fileupload/internal/middleware"
 	"github.com/arjun118/fileupload/service"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -34,7 +33,6 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	fmt.Println("connected to minio successfully")
 	storageProvider := minio.NewStorage(minioClient, bucketName)
 
 	for i := 0; i < 30; i++ {
@@ -42,6 +40,7 @@ func main() {
 		err = storageProvider.EnsureBucket(context.Background())
 
 		if err == nil {
+			log.Println("connected to minio successfully")
 			break
 		}
 
@@ -60,25 +59,24 @@ func main() {
 	videoService := service.NewVideoService(storageProvider, deliverProvider, 3, "minio")
 	videoHandler := handlers.NewVideoHandler(videoService)
 	r := chi.NewRouter()
-	r.Use(mid.Authenticate)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("alive\n"))
 	})
+	r.With(routingmiddleware.CookieAuthenticate).Handle("/media/*", &handlers.RedirectHandler{
+		BucketName: bucketName,
+	})
+
 	r.Route("/api/videos", func(r chi.Router) {
+		r.Use(routingmiddleware.TokenAuthenticate)
+		r.Post("/auth-cookie", videoHandler.GetAuthCookie)
 		r.Post("/", videoHandler.Upload)   // POST /api/videos
 		r.Get("/url", videoHandler.GetURL) // GET /api/videos/url?key=...
 		r.Delete("/", videoHandler.Delete) // DELETE /api/videos?key=...
 	})
-	r.Handle("/media/*", &handlers.ProxyHandler{
-		MinioClient: minioClient,
-		BucketName:  bucketName,
-	})
-	// workDir, _ := os.Getwd()
-	// filesDir := http.Dir(filepath.Join(workDir, "storage"))
-	// r.Handle("/media/*", http.StripPrefix("/media", http.FileServer(filesDir)))
+
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: r,

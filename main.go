@@ -26,7 +26,7 @@ func main() {
 	// r.Handle("/*", http.FileServer(http.Dir("./")))
 	storageDir := "./storage"
 	storageProvider := local.NewStorage(storageDir)
-	deliverProvider := delivery.NewDelivery("http://localhost:8080/media")
+	deliverProvider := delivery.NewLocalDelivery("http://localhost:8080/media")
 	videoService := service.NewVideoService(storageProvider, deliverProvider, 3)
 	videoHandler := handlers.NewVideoHandler(videoService)
 	r := chi.NewRouter()

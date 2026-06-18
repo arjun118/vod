@@ -22,7 +22,7 @@ import (
 
 func main() {
 	bucketName := "storage"
-	endpoint := "localhost:9000"
+	endpoint := "minio:9000"
 	accessKeyID := "adminpass"
 	secretAccessKey := "adminpass"
 	useSSL := false
@@ -35,10 +35,25 @@ func main() {
 	}
 	fmt.Println("connected to minio successfully")
 	storageProvider := minio.NewStorage(minioClient, bucketName)
-	if err := storageProvider.EnsureBucket(context.Background()); err != nil {
-		log.Fatalf("failed to initialze storage bucket: %w", err)
+	for i := 0; i < 30; i++ {
+
+		err = storageProvider.EnsureBucket(context.Background())
+
+		if err == nil {
+			break
+		}
+
+		log.Printf("waiting for minio (%d/30): %v", i+1, err)
+
+		time.Sleep(2 * time.Second)
 	}
-	deliverProvider := delivery.NewMinioDelivery(bucketName, endpoint)
+
+	if err != nil {
+		log.Fatalf("failed to initialize bucket: %v", err)
+	} else {
+		log.Println("ensured bucket...")
+	}
+	deliverProvider := delivery.NewMinioDelivery(bucketName, "localhost:9000")
 	videoService := service.NewVideoService(storageProvider, deliverProvider, 3, "minio")
 	videoHandler := handlers.NewVideoHandler(videoService)
 	r := chi.NewRouter()
@@ -49,10 +64,6 @@ func main() {
 		r.Get("/url", videoHandler.GetURL) // GET /api/videos/url?key=...
 		r.Delete("/", videoHandler.Delete) // DELETE /api/videos?key=...
 	})
-	// workDir, _ := os.Getwd()
-	// filesDir := http.Dir(filepath.Join(workDir, "storage"))
-	// r.Handle("/media/*", http.StripPrefix("/media", http.FileServer(filesDir)))
-
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: r,

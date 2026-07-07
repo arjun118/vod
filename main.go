@@ -21,7 +21,8 @@ import (
 )
 
 func main() {
-	bucketName := "storage"
+	rawBucketName := "uploads"
+	streamsBucketName := "streams"
 	endpoint := "minio:9000"
 	accessKeyID := "adminpass"
 	secretAccessKey := "adminpass"
@@ -33,11 +34,11 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	storageProvider := minio.NewStorage(minioClient, bucketName)
+	storageProvider := minio.NewStorage(minioClient, rawBucketName, streamsBucketName)
 
 	for i := 0; i < 30; i++ {
 
-		err = storageProvider.EnsureBucket(context.Background())
+		err = storageProvider.EnsureBuckets(context.Background())
 
 		if err == nil {
 			log.Println("connected to minio successfully")
@@ -55,7 +56,7 @@ func main() {
 		log.Println("ensured bucket...")
 	}
 
-	deliverProvider := delivery.NewMinioDelivery(bucketName, "localhost:8080/media")
+	deliverProvider := delivery.NewMinioDelivery(streamsBucketName, "localhost:8080/media")
 	videoService := service.NewVideoService(storageProvider, deliverProvider, 3, "minio")
 	videoHandler := handlers.NewVideoHandler(videoService)
 	r := chi.NewRouter()
@@ -66,7 +67,7 @@ func main() {
 		w.Write([]byte("alive\n"))
 	})
 	r.With(routingmiddleware.CookieAuthenticate).Handle("/media/*", &handlers.RedirectHandler{
-		BucketName: bucketName,
+		BucketName: streamsBucketName,
 	})
 
 	r.Route("/api/videos", func(r chi.Router) {

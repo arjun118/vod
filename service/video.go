@@ -1,6 +1,5 @@
 package service
 
-//////fix this shit later
 import (
 	"context"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/arjun118/fileupload/internal/media"
+	"github.com/arjun118/fileupload/internal/transcoder"
 	"github.com/google/uuid"
 )
 
@@ -23,6 +23,7 @@ type TranscodeJob struct {
 }
 
 type VideoService struct {
+	transcoder *transcoder.Transcoder
 	storage    media.StorageProvider
 	delivery   media.DeliveryProvider
 	jobQueue   chan TranscodeJob
@@ -33,8 +34,9 @@ type VideoService struct {
 
 func NewVideoService(storage media.StorageProvider, delivery media.DeliveryProvider, maxWorkers int, provider string) *VideoService {
 	svc := &VideoService{
-		storage:  storage,
-		delivery: delivery,
+		transcoder: transcoder.New(),
+		storage:    storage,
+		delivery:   delivery,
 		//buffer size for queued jobs
 		jobQueue:   make(chan TranscodeJob, 100),
 		maxWorkers: maxWorkers,
@@ -94,7 +96,9 @@ func (v *VideoService) processAndSaveHLS(ctx context.Context, videoID string, te
 		}
 	}()
 
-	_, err = TranscodeToHLS(ctx, tempSourcePath, tempHLSDir)
+	// _, err = TranscodeToHLS(ctx, tempSourcePath, tempHLSDir)
+	// using transcoder now - seperated from service
+	err = v.transcoder.Transcode(ctx, tempSourcePath, tempHLSDir)
 	if err != nil {
 		return fmt.Errorf("transcode failed: %w", err)
 	}
@@ -132,6 +136,7 @@ func (v *VideoService) saveSegment(ctx context.Context, srcPath, destKey, fileNa
 		Filename:    fileName,
 		ContentType: contentType,
 	}
+	// saveSegment will use saveStream
 	_, err = v.storage.Save(ctx, destKey, file, meta)
 	if err != nil {
 		return fmt.Errorf("storage save failed: %w", err)
@@ -163,7 +168,7 @@ func (v *VideoService) Upload(ctx context.Context, file io.Reader, meta media.Fi
 	// videos/2026/06/video_uuid
 	finalBasePath := v.generateHLSFolderPath(videoID)
 	// videos/2026/06/video_uuid/playlist.m3u8
-	playlistKey := filepath.ToSlash(filepath.Join(finalBasePath, "playlist.m3u8"))
+	playlistKey := filepath.ToSlash(filepath.Join(finalBasePath, "master.m3u8"))
 	playBackURL, err := v.delivery.URL(ctx, playlistKey)
 	if err != nil {
 		os.Remove(tempSourcePath)

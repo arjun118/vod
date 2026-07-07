@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"path/filepath"
 
 	"github.com/arjun118/fileupload/internal/media"
 	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/lifecycle"
 )
 
 // put object
@@ -16,100 +16,129 @@ import (
 // stat object
 
 type Storage struct {
-	Client     *minio.Client
-	BucketName string
+	Client           *minio.Client
+	rawVideosBucket  string
+	streamBucketName string
 }
 
-func NewStorage(client *minio.Client, bucketName string) *Storage {
+func NewStorage(client *minio.Client, rawBucketName, streamBucketName string) *Storage {
 	return &Storage{
-		Client:     client,
-		BucketName: bucketName,
+		Client:           client,
+		rawVideosBucket:  rawBucketName,
+		streamBucketName: streamBucketName,
 	}
 }
 
-func (s *Storage) EnsureBucket(ctx context.Context) error {
-	bucketExists, err := s.Client.BucketExists(ctx, s.BucketName)
+func (s *Storage) EnsureBuckets(ctx context.Context) error {
+	if err := s.ensureRawBucket(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureStreamBucket(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Storage) ensureRawBucket(ctx context.Context) error {
+	bucketExists, err := s.Client.BucketExists(ctx, s.rawVideosBucket)
 	if err != nil {
 		return fmt.Errorf("failed to check bucket existence: %w", err)
 	}
 	if !bucketExists {
-		log.Printf("bucket doesnot exists, creating bucket: %s\n", s.BucketName)
-		err := s.Client.MakeBucket(ctx, s.BucketName, minio.MakeBucketOptions{})
+		log.Printf("bucket doesnot exists, creating bucket: %s\n", s.rawVideosBucket)
+		err := s.Client.MakeBucket(ctx, s.rawVideosBucket, minio.MakeBucketOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to create bucket: %w", err)
 		}
-		publicPolicy := fmt.Sprintf(`{
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Sid": "PublicRead",
-                    "Principal": {"AWS": ["*"]},
-                    "Action": ["s3:GetObject"],
-                    "Resource": ["arn:aws:s3:::%s/*"]
-                }
-            ]
-        }`, s.BucketName)
-
-		log.Println("Configuring public read policy for bucket:", s.BucketName)
-		if err = s.Client.SetBucketPolicy(ctx, s.BucketName, publicPolicy); err !=
+		config := lifecycle.NewConfiguration()
+		config.Rules = []lifecycle.Rule{
+			{
+				ID:     "ExpireRawUploads",
+				Status: "Enabled",
+				Expiration: lifecycle.Expiration{
+					Days: 7,
+				},
+			},
+		}
+		lifecycle.NewConfiguration()
+		log.Println("Configuring expiry (cleanup) policy for bucket:", s.rawVideosBucket)
+		if err = s.Client.SetBucketLifecycle(ctx, s.rawVideosBucket, config); err !=
 			nil {
-			return fmt.Errorf("failed to set public policy: %w", err)
+			return fmt.Errorf("failed to set expire policy raw bucket: %w", err)
 		}
 	}
-	//if bucket already exists we just skip it - dont make any changes to the policy
-
-	//you might want to configure cors rules for your bucket while using the backend with a frontend
-
 	return nil
 }
 
-func (s *Storage) Save(ctx context.Context, objectKey string, r io.Reader, meta media.FileMetaData) (int64, error) {
-	//save this to minio bucket
-	// videos/year/month/filename.ext
-	filePathWithFolder := filepath.FromSlash(objectKey)
-
-	var contentType string
-	switch filepath.Ext(objectKey) {
-	case ".m3u8":
-		contentType = "application/vnd.apple.mpegurl"
-	case ".ts":
-		contentType = "video/mp2t"
-	case ".vtt":
-		contentType = "text/vtt"
-	case ".jpg", ".jpeg":
-		contentType = "image/jpeg"
-	case ".png":
-		contentType = "image/png"
-	default:
-		contentType = "application/octet-stream"
-	}
-
-	uploadInfo, err := s.Client.PutObject(ctx, s.BucketName, filePathWithFolder,
-		r, -1, minio.PutObjectOptions{
-			ContentType: contentType,
-		})
+func (s *Storage) ensureStreamBucket(ctx context.Context) error {
+	bucketExists, err := s.Client.BucketExists(ctx, s.streamBucketName)
 	if err != nil {
-		return 0, err
+		return fmt.Errorf("failed to check stream bucket existence: %w", err)
 	}
-	size := uploadInfo.Size
-
-	return size, nil
-}
-
-func (s *Storage) Delete(ctx context.Context, objectKey string) error {
-	//delete from bucket
-	filePathWithFolder := filepath.FromSlash(objectKey)
-	bucketExists, err := s.Client.BucketExists(ctx, s.BucketName)
-	if err != nil {
-		return err
-	}
-	if bucketExists {
-		_, err := s.Client.StatObject(ctx, s.BucketName, filePathWithFolder, minio.StatObjectOptions{})
+	if !bucketExists {
+		log.Printf("bucket doesnot exists, creating bucket: %s\n", s.streamBucketName)
+		err := s.Client.MakeBucket(ctx, s.streamBucketName, minio.MakeBucketOptions{})
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to create bucket: %w", err)
 		}
 	}
-	err = s.Client.RemoveObject(ctx, s.BucketName, filePathWithFolder, minio.RemoveObjectOptions{})
-	return err
+	return nil
 }
+
+func (s *Storage) SaveRaw(ctx context.Context, objectKey string, r io.Reader, meta media.FileMetaData) (int64, error) {
+
+}
+
+func (s *Storage) SaveStream(ctx context.Context, objectKey string, r io.Reader, meta media.FileMetaData) (int64, error) {
+
+}
+
+// func (s *Storage) Save(ctx context.Context, objectKey string, r io.Reader, meta media.FileMetaData) (int64, error) {
+// 	//save this to minio bucket
+// 	// videos/year/month/filename.ext
+// 	filePathWithFolder := filepath.FromSlash(objectKey)
+
+// 	var contentType string
+// 	switch filepath.Ext(objectKey) {
+// 	case ".m3u8":
+// 		contentType = "application/vnd.apple.mpegurl"
+// 	case ".ts":
+// 		contentType = "video/mp2t"
+// 	case ".vtt":
+// 		contentType = "text/vtt"
+// 	case ".jpg", ".jpeg":
+// 		contentType = "image/jpeg"
+// 	case ".png":
+// 		contentType = "image/png"
+// 	default:
+// 		contentType = "application/octet-stream"
+// 	}
+
+// 	uploadInfo, err := s.Client.PutObject(ctx, s.BucketName, filePathWithFolder,
+// 		r, -1, minio.PutObjectOptions{
+// 			ContentType: contentType,
+// 		})
+// 	if err != nil {
+// 		return 0, err
+// 	}
+// 	size := uploadInfo.Size
+
+// 	return size, nil
+// }
+
+// func (s *Storage) Delete(ctx context.Context, objectKey string) error {
+// 	//delete from bucket
+// 	filePathWithFolder := filepath.FromSlash(objectKey)
+// 	bucketExists, err := s.Client.BucketExists(ctx, s.BucketName)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	if bucketExists {
+// 		_, err := s.Client.StatObject(ctx, s.BucketName, filePathWithFolder, minio.StatObjectOptions{})
+// 		if err != nil {
+// 			return err
+// 		}
+// 	}
+// 	err = s.Client.RemoveObject(ctx, s.BucketName, filePathWithFolder, minio.RemoveObjectOptions{})
+// 	return err
+// }

@@ -23,8 +23,11 @@ type MediaObject struct {
 }
 
 type StorageProvider interface {
-	Save(ctx context.Context, objectKey string, r io.Reader, meta FileMetaData) (int64, error)
-	Delete(ctx context.Context, objectKey string) error
+	SaveRaw(ctx context.Context, objectKey string, r io.Reader, meta FileMetaData) (int64, error)
+	SaveStream(ctx context.Context, objectKey string, r io.Reader, meta FileMetaData) (int64, error)
+	DeleteStream(ctx context.Context, objectKey string) error
+	DeleteRaw(ctx context.Context, objectKey string) error
+	Get(ctx context.Context, objectKey string, destinationDir string) (string, error)
 }
 
 type DeliveryProvider interface {

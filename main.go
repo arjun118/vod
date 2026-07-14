@@ -55,7 +55,6 @@ func main() {
 	} else {
 		log.Println("ensured bucket...")
 	}
-
 	deliverProvider := delivery.NewMinioDelivery(streamsBucketName, "localhost:8080/media")
 	videoService := service.NewVideoService(storageProvider, deliverProvider, 3, "minio")
 	videoHandler := handlers.NewVideoHandler(videoService)

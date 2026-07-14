@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 
 	"github.com/arjun118/fileupload/internal/media"
 	"github.com/minio/minio-go/v7"
@@ -81,64 +83,113 @@ func (s *Storage) ensureStreamBucket(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to create bucket: %w", err)
 		}
+		log.Println("setting stream bucket to public - only accessible over the docker network not by all the internet")
+		publicPolicy := fmt.Sprintf(`{
+					"Version": "2012-10-17",
+					"Statement": [
+						{
+							"Effect": "Allow",
+							"Principal": {"AWS": ["*"]},
+							"Action": ["s3:GetObject"],
+							"Resource": ["arn:aws:s3:::%s/*"]
+						}
+					]
+			}`, s.streamBucketName)
+		err = s.Client.SetBucketPolicy(ctx, s.streamBucketName, publicPolicy)
+		if err != nil {
+			return fmt.Errorf("failed to set streams bucket as public: %w", err)
+		}
+		log.Printf("streams bucket made public successfully...")
 	}
 	return nil
 }
 
 func (s *Storage) SaveRaw(ctx context.Context, objectKey string, r io.Reader, meta media.FileMetaData) (int64, error) {
+	//save this to minio bucket
+	// 	// videos/year/month/filename.ext
+	// this will just upload to the raw bucket
+	contentType := media.ContentTypeFromExtension(objectKey)
+	uploadInfo, err := s.Client.PutObject(ctx, s.rawVideosBucket, objectKey,
+		r, -1, minio.PutObjectOptions{
+			ContentType: contentType,
+		})
+	if err != nil {
+		return 0, err
+	}
+	size := uploadInfo.Size
 
+	return size, nil
 }
 
 func (s *Storage) SaveStream(ctx context.Context, objectKey string, r io.Reader, meta media.FileMetaData) (int64, error) {
+	//save this to minio bucket
+	// 	// videos/year/month/filename.ext
+	// this will just upload to the stream bucket
+	contentType := media.ContentTypeFromExtension(objectKey)
+	uploadInfo, err := s.Client.PutObject(ctx, s.streamBucketName, objectKey,
+		r, -1, minio.PutObjectOptions{
+			ContentType: contentType,
+		})
+	if err != nil {
+		return 0, err
+	}
+	size := uploadInfo.Size
 
+	return size, nil
 }
 
-// func (s *Storage) Save(ctx context.Context, objectKey string, r io.Reader, meta media.FileMetaData) (int64, error) {
-// 	//save this to minio bucket
-// 	// videos/year/month/filename.ext
-// 	filePathWithFolder := filepath.FromSlash(objectKey)
+func (s *Storage) DeleteRaw(ctx context.Context, objectKey string) error {
+	//delete from raw videos
+	filePathWithFolder := filepath.FromSlash(objectKey)
+	bucketExists, err := s.Client.BucketExists(ctx, s.rawVideosBucket)
+	if err != nil {
+		return err
+	}
+	if bucketExists {
+		_, err := s.Client.StatObject(ctx, s.rawVideosBucket, filePathWithFolder, minio.StatObjectOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	err = s.Client.RemoveObject(ctx, s.rawVideosBucket, filePathWithFolder, minio.RemoveObjectOptions{})
+	return err
+}
 
-// 	var contentType string
-// 	switch filepath.Ext(objectKey) {
-// 	case ".m3u8":
-// 		contentType = "application/vnd.apple.mpegurl"
-// 	case ".ts":
-// 		contentType = "video/mp2t"
-// 	case ".vtt":
-// 		contentType = "text/vtt"
-// 	case ".jpg", ".jpeg":
-// 		contentType = "image/jpeg"
-// 	case ".png":
-// 		contentType = "image/png"
-// 	default:
-// 		contentType = "application/octet-stream"
-// 	}
+func (s *Storage) DeleteStream(ctx context.Context, objectKey string) error {
+	//delete from stream bucket
+	filePathWithFolder := filepath.FromSlash(objectKey)
+	bucketExists, err := s.Client.BucketExists(ctx, s.streamBucketName)
+	if err != nil {
+		return err
+	}
+	if bucketExists {
+		_, err := s.Client.StatObject(ctx, s.streamBucketName, filePathWithFolder, minio.StatObjectOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	err = s.Client.RemoveObject(ctx, s.streamBucketName, filePathWithFolder, minio.RemoveObjectOptions{})
+	return err
+}
 
-// 	uploadInfo, err := s.Client.PutObject(ctx, s.BucketName, filePathWithFolder,
-// 		r, -1, minio.PutObjectOptions{
-// 			ContentType: contentType,
-// 		})
-// 	if err != nil {
-// 		return 0, err
-// 	}
-// 	size := uploadInfo.Size
+func (s *Storage) Get(ctx context.Context, objectKey string, destinationDir string) (string, error) {
+	minioObject, err := s.Client.GetObject(ctx, s.rawVideosBucket, objectKey, minio.GetObjectOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get the raw video: %w", err)
+	}
 
-// 	return size, nil
-// }
-
-// func (s *Storage) Delete(ctx context.Context, objectKey string) error {
-// 	//delete from bucket
-// 	filePathWithFolder := filepath.FromSlash(objectKey)
-// 	bucketExists, err := s.Client.BucketExists(ctx, s.BucketName)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	if bucketExists {
-// 		_, err := s.Client.StatObject(ctx, s.BucketName, filePathWithFolder, minio.StatObjectOptions{})
-// 		if err != nil {
-// 			return err
-// 		}
-// 	}
-// 	err = s.Client.RemoveObject(ctx, s.BucketName, filePathWithFolder, minio.RemoveObjectOptions{})
-// 	return err
-// }
+	defer minioObject.Close()
+	if err := os.MkdirAll(destinationDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create HLS temp dir: %w", err)
+	}
+	destinationFilePath := filepath.Join(destinationDir, "raw.mp4")
+	localFile, err := os.Create(destinationFilePath)
+	if err != nil {
+		return "", fmt.Errorf("could not able to create local file for raw video download: %w", err)
+	}
+	defer localFile.Close()
+	if _, err = io.Copy(localFile, minioObject); err != nil {
+		return "", fmt.Errorf("could not raw download video from storage: %w", err)
+	}
+	return destinationFilePath, nil
+}

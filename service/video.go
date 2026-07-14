@@ -16,10 +16,10 @@ import (
 )
 
 type TranscodeJob struct {
-	ID             string
-	TempSourcePath string
-	FinalBasePath  string
-	Ctx            context.Context
+	VideoID string
+	//this will be the object key for the source video
+	// need to download from this
+	StorageSourceKey string
 }
 
 type VideoService struct {
@@ -30,6 +30,32 @@ type VideoService struct {
 	workerWg   sync.WaitGroup
 	maxWorkers int
 	Provider   string
+}
+
+func (v *VideoService) generateStorageSourceKey(videoID string) string {
+	now := time.Now()
+	year := now.Format("2006")
+	month := now.Format("01")
+	return filepath.ToSlash(filepath.Join("videos", year, month, videoID, "raw.mp4"))
+}
+
+func (v *VideoService) generateStorageStreamKey(videoID string) string {
+	//this is also playlist key
+	now := time.Now()
+	year := now.Format("2006")
+	month := now.Format("01")
+	return filepath.ToSlash(filepath.Join("videos", year, month, videoID, "master.m3u8"))
+}
+
+func (v *VideoService) generateStorageStreamFolder(videoID string) string {
+	now := time.Now()
+	year := now.Format("2006")
+	month := now.Format("01")
+	return filepath.ToSlash(filepath.Join("videos", year, month, videoID))
+}
+
+func (v *VideoService) workDir(videoID string) string {
+	return filepath.Join("/tmp/jobs", videoID)
 }
 
 func NewVideoService(storage media.StorageProvider, delivery media.DeliveryProvider, maxWorkers int, provider string) *VideoService {
@@ -53,14 +79,17 @@ func (v *VideoService) StartWorkerPool() {
 			defer v.workerWg.Done()
 			log.Printf("starting transcode worker %d", workerID)
 			for job := range v.jobQueue {
-				log.Printf("Worker %d starting job %s", workerID, job.ID)
+				log.Printf("Worker %d starting job %s", workerID, job.VideoID)
+				// /tmp/jobs/video_id
+				workDir := v.workDir(job.VideoID)
+				output := filepath.Join(workDir, "output")
 				jobCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				err := v.processAndSaveHLS(jobCtx, job.ID, job.TempSourcePath, job.FinalBasePath)
+				err := v.processAndSaveHLS(jobCtx, job.VideoID, job.StorageSourceKey, output)
 				if err != nil {
-					log.Printf("[Error] Job %s failed: %v", job.ID, err)
+					log.Printf("[Error] Job %s failed: %v", job.VideoID, err)
 					//prod: update database job status - failed
 				} else {
-					log.Printf("Job %s completed successfully", job.ID)
+					log.Printf("Job %s completed successfully", job.VideoID)
 				}
 				cancel()
 			}
@@ -73,36 +102,30 @@ func (v *VideoService) StopWorkerPool() {
 	v.workerWg.Wait()
 }
 
-func (v *VideoService) generateHLSFolderPath(videoID string) string {
-	now := time.Now()
-	year := now.Format("2006")
-	month := now.Format("01")
-
-	return filepath.ToSlash(filepath.Join("videos", year, month, videoID))
-}
-
-func (v *VideoService) processAndSaveHLS(ctx context.Context, videoID string, tempSourcePath string, finalBasePath string) (err error) {
-	tempHLSDir := filepath.Join("/tmp", "hls_"+videoID)
-
-	if err := os.MkdirAll(tempHLSDir, 0755); err != nil {
-		return fmt.Errorf("failed to create HLS temp dir: %w", err)
+func (v *VideoService) processAndSaveHLS(ctx context.Context, videoID string, storageSourceKey string, localStreamFolder string) (err error) {
+	if err := os.MkdirAll(localStreamFolder, 0755); err != nil {
+		return fmt.Errorf("failed to create temp local stream dir: %w", err)
+	}
+	localSourceFolder := v.workDir(videoID)
+	localSourcePath, err := v.storage.Get(ctx, storageSourceKey, localSourceFolder)
+	if err != nil {
+		return fmt.Errorf("failed to download source to local: %w", err)
 	}
 	//clean the temporary folders
 	defer func() {
-		os.RemoveAll(tempHLSDir)
-		os.Remove(tempSourcePath)
+		os.RemoveAll(localStreamFolder)
+		os.Remove(localSourcePath)
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic recovered during transcoding: %v", r)
 		}
 	}()
-
-	// _, err = TranscodeToHLS(ctx, tempSourcePath, tempHLSDir)
-	// using transcoder now - seperated from service
-	err = v.transcoder.Transcode(ctx, tempSourcePath, tempHLSDir)
+	//localSourcePath - /tmp/jobs/vid_id/raw.mp4
+	// localStreamFolder  - /tmp/jobs/vid_id/output
+	err = v.transcoder.Transcode(ctx, localSourcePath, localStreamFolder)
 	if err != nil {
 		return fmt.Errorf("transcode failed: %w", err)
 	}
-	entries, err := os.ReadDir(tempHLSDir)
+	entries, err := os.ReadDir(localStreamFolder)
 	if err != nil {
 		return fmt.Errorf("failed to read output directory %w", err)
 	}
@@ -111,11 +134,12 @@ func (v *VideoService) processAndSaveHLS(ctx context.Context, videoID string, te
 		if entry.IsDir() {
 			continue
 		}
-		//playlist.m3u8 or playlist0.ts
+		//master.m3u8 or manifest.mpd or any chunk for hls/dash
 		fileName := entry.Name()
-		tempFilePath := filepath.Join(tempHLSDir, fileName)
-		finalObjectKey := filepath.ToSlash(filepath.Join(finalBasePath, fileName))
-		if err := v.saveSegment(ctx, tempFilePath, finalObjectKey, fileName); err != nil {
+		localSegmentPath := filepath.Join(localStreamFolder, fileName)
+		storageStreamFolder := v.generateStorageStreamFolder(videoID)
+		finalObjectKey := filepath.ToSlash(filepath.Join(storageStreamFolder, fileName))
+		if err := v.saveSegment(ctx, localSegmentPath, finalObjectKey, fileName); err != nil {
 			return fmt.Errorf("failed to save segment %s: %w", fileName, err)
 		}
 	}
@@ -128,64 +152,48 @@ func (v *VideoService) saveSegment(ctx context.Context, srcPath, destKey, fileNa
 		return err
 	}
 	defer file.Close()
-	contentType := "video/mp2t"
-	if filepath.Ext(fileName) == ".m3u8" {
-		contentType = "application/vnd.apple.mpegurl"
-	}
+	contentType := media.ContentTypeFromExtension(fileName)
 	meta := media.FileMetaData{
 		Filename:    fileName,
 		ContentType: contentType,
 	}
 	// saveSegment will use saveStream
-	_, err = v.storage.Save(ctx, destKey, file, meta)
+	_, err = v.storage.SaveStream(ctx, destKey, file, meta)
 	if err != nil {
-		return fmt.Errorf("storage save failed: %w", err)
+		return fmt.Errorf("storage save of segment failed: %w", err)
 	}
 	return nil
 }
 
 func (v *VideoService) Upload(ctx context.Context, file io.Reader, meta media.FileMetaData) (*media.MediaObject, error) {
-	//a uuid string
 	videoID := uuid.NewString()
-	// save the raw file to the disk right now
-	tempRawDir := filepath.Join("/tmp", "raw_videos")
-	if err := os.MkdirAll(tempRawDir, 0755); err != nil {
-		return nil, err
-	}
-	tempSourcePath := filepath.Join(tempRawDir, videoID+".mp4")
-	tempFile, err := os.Create(tempSourcePath)
+	log.Println("uploading the raw file to minio raw bucket...")
+	rawUploadContext, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	// videos/year/month/videoid/raw.mp4
+	rawObjectKey := v.generateStorageSourceKey(videoID)
+	size, err := v.storage.SaveRaw(rawUploadContext, rawObjectKey, file, media.FileMetaData{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("raw video storage save failed: %w", err)
 	}
-	log.Println("writing the raw file to temp file: ", tempSourcePath)
-	size, err := io.Copy(tempFile, file)
 	log.Println("size of the raw file: ", float64(size)/float64(1024*1024))
-	tempFile.Close()
-	if err != nil {
-		os.Remove(tempSourcePath)
-		return nil, fmt.Errorf("failed to save raw file upload: %w", err)
-	}
-	// videos/2026/06/video_uuid
-	finalBasePath := v.generateHLSFolderPath(videoID)
-	// videos/2026/06/video_uuid/playlist.m3u8
-	playlistKey := filepath.ToSlash(filepath.Join(finalBasePath, "master.m3u8"))
+	// videos/2026/06/video_uuid/master.m3u8
+	playlistKey := v.generateStorageStreamKey(videoID)
 	playBackURL, err := v.delivery.URL(ctx, playlistKey)
 	if err != nil {
-		os.Remove(tempSourcePath)
+		// os.Remove(tempSourcePath)
 		return nil, fmt.Errorf("failed to generate playback URL: %w", err)
 	}
 	job := TranscodeJob{
-		ID:             videoID,
-		TempSourcePath: tempSourcePath,
-		FinalBasePath:  finalBasePath,
-		Ctx:            context.Background(),
+		VideoID:          videoID,
+		StorageSourceKey: rawObjectKey,
 	}
 	select {
 	case v.jobQueue <- job:
 		log.Printf("Job %s successfully queued: ", videoID)
 	default:
 		//queue is full, handle backpressure
-		os.Remove(tempSourcePath)
+		// os.Remove(tempSourcePath)
 		return nil, fmt.Errorf("server queue is full, please retry again")
 	}
 	return &media.MediaObject{
@@ -199,9 +207,6 @@ func (v *VideoService) Upload(ctx context.Context, file io.Reader, meta media.Fi
 }
 
 func (s *VideoService) GetPlaybackURL(ctx context.Context, objectKey string) (string, error) {
-	// Business logic goes here:
-	// e.g., s.db.GetVideoOwner(objectKey) -> check if current user is allowed to view it.
-
 	url, err := s.delivery.URL(ctx, objectKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to get playback URL for key %s: %w", objectKey, err)
@@ -212,18 +217,9 @@ func (s *VideoService) GetPlaybackURL(ctx context.Context, objectKey string) (st
 
 // Delete removes a video from the storage provider (and eventually the database).
 func (s *VideoService) Delete(ctx context.Context, objectKey string) error {
-	// Business logic goes here:
-	// e.g., check if the user requesting the delete actually owns the video.
-
-	// 1. Delete from physical storage
-	err := s.storage.Delete(ctx, objectKey)
+	err := s.storage.DeleteRaw(ctx, objectKey)
 	if err != nil {
 		return fmt.Errorf("failed to delete video from storage: %w", err)
 	}
-
-	// 2. Future: Delete metadata from database
-	// err = s.db.DeleteVideo(ctx, objectKey)
-	// if err != nil { ... }
-
 	return nil
 }

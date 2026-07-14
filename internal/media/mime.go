@@ -15,6 +15,8 @@ func ContentTypeFromExtension(objectKey string) string {
 		contentType = "image/jpeg"
 	case ".png":
 		contentType = "image/png"
+	case ".mp4":
+		contentType = "video/mp4"
 	default:
 		contentType = "application/octet-stream"
 	}

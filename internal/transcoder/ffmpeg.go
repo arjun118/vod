@@ -1,10 +1,10 @@
 package transcoder
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -268,8 +268,13 @@ func Run(ctx context.Context, plan *EncodingPlan) error {
 		args...,
 	)
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		// Only log the output if ffmpeg fails
+		return fmt.Errorf("ffmpeg error: %v, output: %s", err, stderr.String())
+	}
 
-	return cmd.Run()
+	return nil
 }

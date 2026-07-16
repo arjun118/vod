@@ -9,33 +9,29 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/arjun118/fileupload/internal/config"
 	"github.com/arjun118/fileupload/internal/handlers"
+	"github.com/arjun118/fileupload/internal/infra"
 	"github.com/arjun118/fileupload/internal/media/delivery"
 	"github.com/arjun118/fileupload/internal/media/minio"
 	routingmiddleware "github.com/arjun118/fileupload/internal/middleware"
+	"github.com/arjun118/fileupload/internal/queue"
 	"github.com/arjun118/fileupload/service"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	miniosdk "github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 func main() {
-	rawBucketName := "uploads"
-	streamsBucketName := "streams"
-	endpoint := "minio:9000"
-	accessKeyID := "adminpass"
-	secretAccessKey := "adminpass"
-	useSSL := false
-	minioClient, err := miniosdk.New(endpoint, &miniosdk.Options{
-		Creds:  credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
-		Secure: useSSL,
-	})
-	if err != nil {
-		log.Fatalln(err)
-	}
-	storageProvider := minio.NewStorage(minioClient, rawBucketName, streamsBucketName)
 
+	cfg := config.Load()
+
+	minioClient, _ := infra.NewMinioClient(cfg)
+	redisClient := infra.NewRedisClient(cfg)
+	transcodeQueue := queue.NewRedisQueue(redisClient, cfg.TranscodeQueueName)
+
+	storageProvider := minio.NewStorage(minioClient, cfg.RawBucketName, cfg.StreamsBucketName)
+	deliverProvider := delivery.NewMinioDelivery(cfg.StreamsBucketName, cfg.NginxDeliveryEndpoint)
+	var err error
 	for i := 0; i < 30; i++ {
 
 		err = storageProvider.EnsureBuckets(context.Background())
@@ -55,8 +51,7 @@ func main() {
 	} else {
 		log.Println("ensured bucket...")
 	}
-	deliverProvider := delivery.NewMinioDelivery(streamsBucketName, "localhost:8080/media")
-	videoService := service.NewVideoService(storageProvider, deliverProvider, 3, "minio")
+	videoService := service.NewVideoService(storageProvider, deliverProvider, transcodeQueue, "minio")
 	videoHandler := handlers.NewVideoHandler(videoService)
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -66,7 +61,7 @@ func main() {
 		w.Write([]byte("alive\n"))
 	})
 	r.With(routingmiddleware.CookieAuthenticate).Handle("/media/*", &handlers.RedirectHandler{
-		BucketName: streamsBucketName,
+		BucketName: cfg.StreamsBucketName,
 	})
 
 	r.Route("/api/videos", func(r chi.Router) {
@@ -108,8 +103,6 @@ func main() {
 		log.Println("HTTP server stopped accepting new connections.")
 	}
 
-	log.Println("Closing worker pool queue and waiting for active transcodes to complete...")
-	videoService.StopWorkerPool()
 	log.Println("Worker pool stopped cleanly.")
 
 	log.Println("Application shutdown complete.")

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/arjun118/fileupload/internal/queue"
 	"github.com/arjun118/fileupload/internal/transcoder"
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 )
 
 type VideoService struct {
@@ -86,22 +88,84 @@ func (v *VideoService) ProcessAndSaveHLS(ctx context.Context, videoID string, st
 	}
 	entries, err := os.ReadDir(localStreamFolder)
 	if err != nil {
-		return fmt.Errorf("failed to read output directory %w", err)
+		return fmt.Errorf("failed to read output directory: %w", err)
 	}
+	var mediaPlaylists []string
+	var masterPlaylist string
+	var dashManifest string
+	var streamFiles []string
 	for _, entry := range entries {
-
 		if entry.IsDir() {
 			continue
 		}
-		//master.m3u8 or manifest.mpd or any chunk for hls/dash
-		fileName := entry.Name()
-		localSegmentPath := filepath.Join(localStreamFolder, fileName)
-		storageStreamFolder := v.generateStorageStreamFolder(videoID)
-		finalObjectKey := filepath.ToSlash(filepath.Join(storageStreamFolder, fileName))
-		if err := v.SaveSegment(ctx, localSegmentPath, finalObjectKey, fileName); err != nil {
-			return fmt.Errorf("failed to save segment %s: %w", fileName, err)
+
+		switch entry.Name() {
+		case "master.m3u8":
+			masterPlaylist = entry.Name()
+
+		case "manifest.mpd":
+			dashManifest = entry.Name()
+
+		default:
+			switch filepath.Ext(entry.Name()) {
+			case ".m4s":
+				streamFiles = append(streamFiles, entry.Name())
+
+			case ".m3u8":
+				mediaPlaylists = append(mediaPlaylists, entry.Name())
+			}
 		}
 	}
+	eg, groupCtx := errgroup.WithContext(ctx)
+	// equivalent to sema=10 (it internally uses a buffered channel to control)
+	eg.SetLimit(10)
+	storageStreamFolder := v.generateStorageStreamFolder(videoID)
+	log.Println("uploading stream files...")
+	for _, entry := range streamFiles {
+		fileName := entry
+		eg.Go(func() error {
+			localSegmentPath := filepath.Join(localStreamFolder, fileName)
+			finalObjectKey := path.Join(storageStreamFolder, fileName)
+			if err := v.SaveSegment(groupCtx, localSegmentPath, finalObjectKey, fileName); err != nil {
+				return fmt.Errorf("failed to save segment %s: %w", fileName, err)
+			}
+			return nil
+		})
+	}
+	log.Println("uploading stream files complete...")
+	// upload all segments and wait for them to finish, then only upload playlist
+	if err := eg.Wait(); err != nil {
+		return fmt.Errorf("failed to save segments: %w", err)
+	}
+	log.Println("uploading playlist files...")
+	if dashManifest != "" {
+		localSegmentPath := filepath.Join(localStreamFolder, dashManifest)
+		finalObjectKey := path.Join(storageStreamFolder, dashManifest)
+		if err := v.SaveSegment(ctx, localSegmentPath, finalObjectKey, dashManifest); err != nil {
+			return fmt.Errorf("failed to save playlists %s: %w", dashManifest, err)
+		}
+	}
+
+	// Upload rendition playlists
+	for _, entry := range mediaPlaylists {
+		fileName := entry
+		localSegmentPath := filepath.Join(localStreamFolder, fileName)
+		finalObjectKey := path.Join(storageStreamFolder, fileName)
+		if err := v.SaveSegment(ctx, localSegmentPath, finalObjectKey, fileName); err != nil {
+			return fmt.Errorf("failed to save playlists %s: %w", fileName, err)
+		}
+	}
+
+	// Upload master playlist LAST
+	if masterPlaylist != "" {
+		localSegmentPath := filepath.Join(localStreamFolder, masterPlaylist)
+		finalObjectKey := path.Join(storageStreamFolder, masterPlaylist)
+		if err := v.SaveSegment(ctx, localSegmentPath, finalObjectKey, masterPlaylist); err != nil {
+			return fmt.Errorf("failed to save playlists %s: %w", masterPlaylist, err)
+		}
+	}
+
+	log.Println("uploading playlist files complete...")
 	return nil
 }
 

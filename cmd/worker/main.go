@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
+	"path"
 	"sync"
 	"syscall"
 	"time"
@@ -13,6 +13,7 @@ import (
 	"github.com/arjun118/fileupload/internal/config"
 	"github.com/arjun118/fileupload/internal/infra"
 	"github.com/arjun118/fileupload/internal/logger"
+	"github.com/arjun118/fileupload/internal/media"
 	"github.com/arjun118/fileupload/internal/media/delivery"
 	"github.com/arjun118/fileupload/internal/media/minio"
 	"github.com/arjun118/fileupload/internal/queue"
@@ -52,13 +53,14 @@ func StartWorkerPool(ctx context.Context, v *service.VideoService, workerLogger 
 				jobLogger.Info().Msg("processing video")
 
 				jobCtx, jobCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				workDir := v.WorkDir(job.VideoID)
-				output := filepath.Join(workDir, "output")
-
 				start := time.Now()
-				err = v.ProcessAndSaveHLS(jobCtx, job.VideoID, job.StorageSourceKey, output)
+				keys := media.VideoKeys{
+					RawObjectKey: job.StorageSourceKey,
+					PlaylistKey:  job.PlaylistKey,
+					StreamFolder: path.Dir(job.PlaylistKey),
+				}
+				err = v.ProcessAndSaveHLS(jobCtx, job.VideoID, keys)
 				duration := time.Since(start)
-
 				if err != nil {
 					// Use jobLogger.Error() for failures
 					jobLogger.Error().Err(err).Dur("duration", duration).Msg("transcode job failed")
@@ -92,7 +94,8 @@ func main() {
 	storageProvider := minio.NewStorage(minioClient, cfg.RawBucketName, cfg.StreamsBucketName)
 	deliverProvider := delivery.NewMinioDelivery(cfg.StreamsBucketName, "localhost:8080/media")
 
-	videoService := service.NewVideoService(storageProvider, deliverProvider, transcodeQueue, videoServiceLogger, "minio")
+	storageLayout := media.NewStorageLayout("videos")
+	videoService := service.NewVideoService(storageProvider, deliverProvider, transcodeQueue, videoServiceLogger, storageLayout, "minio")
 
 	workerLogger.Info().Msg("worker is running")
 	var wg sync.WaitGroup

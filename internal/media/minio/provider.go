@@ -104,7 +104,7 @@ func (s *Storage) ensureStreamBucket(ctx context.Context) error {
 	return nil
 }
 
-func (s *Storage) SaveRaw(ctx context.Context, objectKey string, r io.Reader, meta media.FileMetaData) (int64, error) {
+func (s *Storage) SaveRaw(ctx context.Context, objectKey string, r io.Reader) (int64, error) {
 	//save this to minio bucket
 	// 	// videos/year/month/filename.ext
 	// this will just upload to the raw bucket
@@ -121,7 +121,7 @@ func (s *Storage) SaveRaw(ctx context.Context, objectKey string, r io.Reader, me
 	return size, nil
 }
 
-func (s *Storage) SaveStream(ctx context.Context, objectKey string, r io.Reader, meta media.FileMetaData) (int64, error) {
+func (s *Storage) SaveStream(ctx context.Context, objectKey string, r io.Reader) (int64, error) {
 	//save this to minio bucket
 	// 	// videos/year/month/filename.ext
 	// this will just upload to the stream bucket
@@ -182,7 +182,7 @@ func (s *Storage) Get(ctx context.Context, objectKey string, destinationDir stri
 	if err := os.MkdirAll(destinationDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create HLS temp dir: %w", err)
 	}
-	destinationFilePath := filepath.Join(destinationDir, "raw.mp4")
+	destinationFilePath := filepath.Join(destinationDir, filepath.Base(objectKey))
 	localFile, err := os.Create(destinationFilePath)
 	if err != nil {
 		return "", fmt.Errorf("could not able to create local file for raw video download: %w", err)

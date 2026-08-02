@@ -13,6 +13,7 @@ import (
 	"github.com/arjun118/fileupload/internal/handlers"
 	"github.com/arjun118/fileupload/internal/infra"
 	"github.com/arjun118/fileupload/internal/logger"
+	"github.com/arjun118/fileupload/internal/media"
 	"github.com/arjun118/fileupload/internal/media/delivery"
 	"github.com/arjun118/fileupload/internal/media/minio"
 	routingmiddleware "github.com/arjun118/fileupload/internal/middleware"
@@ -55,7 +56,8 @@ func main() {
 	} else {
 		log.Println("ensured bucket...")
 	}
-	videoService := service.NewVideoService(storageProvider, deliverProvider, transcodeQueue, videoServiceLogger, "minio")
+	storageLayout := media.NewStorageLayout("videos")
+	videoService := service.NewVideoService(storageProvider, deliverProvider, transcodeQueue, videoServiceLogger, storageLayout, "minio")
 	videoHandler := handlers.NewVideoHandler(videoService)
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)

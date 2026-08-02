@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"time"
 
@@ -24,36 +23,84 @@ type VideoService struct {
 	Delivery   media.DeliveryProvider
 	Queue      queue.Queue
 	Logger     zerolog.Logger
+	Layout     *media.StorageLayout
 	Provider   string
 }
 
-func (v *VideoService) generateStorageSourceKey(videoID string) string {
-	now := time.Now()
-	year := now.Format("2006")
-	month := now.Format("01")
-	return filepath.ToSlash(filepath.Join("videos", year, month, videoID, "raw.mp4"))
+type transcodeOutput struct {
+	MasterPlaylist string
+	DashManifest   string
+	MediaPlaylists []string
+	Segments       []string
 }
 
-func (v *VideoService) generateStorageStreamKey(videoID string) string {
-	//this is also playlist key
-	now := time.Now()
-	year := now.Format("2006")
-	month := now.Format("01")
-	return filepath.ToSlash(filepath.Join("videos", year, month, videoID, "master.m3u8"))
+func classifyOutputFiles(dir string) (*transcodeOutput, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read output directory %w", err)
+	}
+	out := &transcodeOutput{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		switch {
+		case name == "master.m3u8":
+			out.MasterPlaylist = name
+		case name == "manifest.mpd":
+			out.DashManifest = name
+		case filepath.Ext(name) == ".m3u8":
+			out.MediaPlaylists = append(out.MediaPlaylists, name)
+		case filepath.Ext(name) == ".m4s":
+			out.Segments = append(out.Segments, name)
+		}
+	}
+	return out, nil
 }
 
-func (v *VideoService) generateStorageStreamFolder(videoID string) string {
-	now := time.Now()
-	year := now.Format("2006")
-	month := now.Format("01")
-	return filepath.ToSlash(filepath.Join("videos", year, month, videoID))
+func (v *VideoService) uploadStreamAssets(ctx context.Context, localDir string, keys media.VideoKeys, out *transcodeOutput) error {
+	// upload segments concurrently
+	eg, groupCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(10)
+
+	for _, name := range out.Segments {
+		fileName := name
+		eg.Go(func() error {
+			return v.uploadFile(groupCtx, localDir, keys.StreamObjectKey(fileName), fileName)
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return fmt.Errorf("uplaod segments failed: %w", err)
+	}
+	if out.DashManifest != "" {
+		if err := v.uploadFile(ctx, localDir, keys.StreamObjectKey(out.DashManifest), out.DashManifest); err != nil {
+			return fmt.Errorf("upload dash manifest: %w", err)
+		}
+	}
+	// Phase 3: Upload rendition playlists
+	for _, name := range out.MediaPlaylists {
+		if err := v.uploadFile(ctx, localDir, keys.StreamObjectKey(name), name); err != nil {
+			return fmt.Errorf("upload rendition playlist %s: %w", name, err)
+		}
+	}
+
+	// Phase 4: Upload master playlist LAST
+	if out.MasterPlaylist != "" {
+		if err := v.uploadFile(ctx, localDir, keys.StreamObjectKey(out.MasterPlaylist), out.MasterPlaylist); err != nil {
+			return fmt.Errorf("upload master playlist: %w", err)
+		}
+	}
+
+	return nil
+
 }
 
 func (v *VideoService) WorkDir(videoID string) string {
 	return filepath.Join("/tmp/jobs", videoID)
 }
 
-func NewVideoService(storage media.StorageProvider, delivery media.DeliveryProvider, q queue.Queue, logger zerolog.Logger, provider string) *VideoService {
+func NewVideoService(storage media.StorageProvider, delivery media.DeliveryProvider, q queue.Queue, logger zerolog.Logger, l *media.StorageLayout, provider string) *VideoService {
 	svc := &VideoService{
 		Transcoder: transcoder.New(),
 		Storage:    storage,
@@ -61,141 +108,62 @@ func NewVideoService(storage media.StorageProvider, delivery media.DeliveryProvi
 		Queue:      q,
 		Logger:     logger,
 		Provider:   provider,
+		Layout:     l,
 	}
 	return svc
 }
 
-func (v *VideoService) ProcessAndSaveHLS(ctx context.Context, videoID string, storageSourceKey string, localStreamFolder string) (err error) {
+func (v *VideoService) ProcessAndSaveHLS(ctx context.Context, videoID string, keys media.VideoKeys) (err error) {
+
 	jobLogger := v.Logger.With().Str("video_id", videoID).Logger()
-	
-	if err := os.MkdirAll(localStreamFolder, 0755); err != nil {
+	workDir := v.WorkDir(videoID)
+	outputDir := filepath.Join(workDir, "output")
+	storageSourceKey := keys.RawObjectKey
+
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return fmt.Errorf("failed to create temp local stream dir: %w", err)
 	}
-	localSourceFolder := v.WorkDir(videoID)
-	
+	defer func() {
+		os.RemoveAll(workDir)
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic during transcoding: %v", r)
+		}
+	}()
 	downloadStart := time.Now()
-	localSourcePath, err := v.Storage.Get(ctx, storageSourceKey, localSourceFolder)
+	localSourcePath, err := v.Storage.Get(ctx, storageSourceKey, workDir)
 	if err != nil {
 		return fmt.Errorf("failed to download source to local: %w", err)
 	}
-	jobLogger.Info().Dur("duration", time.Since(downloadStart)).Msg("downloaded raw video from minio")
-	//clean the temporary folders
-	defer func() {
-		os.RemoveAll(localStreamFolder)
-		os.Remove(localSourcePath)
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic recovered during transcoding: %v", r)
-		}
-	}()
-	
-	//localSourcePath - /tmp/jobs/vid_id/raw.mp4
-	// localStreamFolder  - /tmp/jobs/vid_id/output
+	jobLogger.Info().Dur("duration", time.Since(downloadStart)).Msg("downloaded raw video")
+
 	transcodeStart := time.Now()
-	err = v.Transcoder.Transcode(ctx, localSourcePath, localStreamFolder)
+	err = v.Transcoder.Transcode(ctx, localSourcePath, outputDir)
 	if err != nil {
 		return fmt.Errorf("transcode failed: %w", err)
 	}
-	jobLogger.Info().Dur("duration", time.Since(transcodeStart)).Msg("ffmpeg transcoding complete")
-	
-	entries, err := os.ReadDir(localStreamFolder)
+	jobLogger.Info().Dur("duration", time.Since(transcodeStart)).Msg("transcoding complete")
+
+	output, err := classifyOutputFiles(outputDir)
 	if err != nil {
-		return fmt.Errorf("failed to read output directory: %w", err)
+		return fmt.Errorf("classfiy output : %w", err)
 	}
-	var mediaPlaylists []string
-	var masterPlaylist string
-	var dashManifest string
-	var streamFiles []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
 
-		switch entry.Name() {
-		case "master.m3u8":
-			masterPlaylist = entry.Name()
-
-		case "manifest.mpd":
-			dashManifest = entry.Name()
-
-		default:
-			switch filepath.Ext(entry.Name()) {
-			case ".m4s":
-				streamFiles = append(streamFiles, entry.Name())
-
-			case ".m3u8":
-				mediaPlaylists = append(mediaPlaylists, entry.Name())
-			}
-		}
-	}
-	eg, groupCtx := errgroup.WithContext(ctx)
-	// equivalent to sema=10 (it internally uses a buffered channel to control)
-	eg.SetLimit(10)
-	storageStreamFolder := v.generateStorageStreamFolder(videoID)
-	
-	jobLogger.Info().Msg("uploading stream files...")
-	
 	uploadStart := time.Now()
-	for _, entry := range streamFiles {
-		fileName := entry
-		eg.Go(func() error {
-			localSegmentPath := filepath.Join(localStreamFolder, fileName)
-			finalObjectKey := path.Join(storageStreamFolder, fileName)
-			if err := v.SaveSegment(groupCtx, localSegmentPath, finalObjectKey, fileName); err != nil {
-				return fmt.Errorf("failed to save segment %s: %w", fileName, err)
-			}
-			return nil
-		})
+	if err := v.uploadStreamAssets(ctx, outputDir, keys, output); err != nil {
+		return fmt.Errorf("upload stream assets: %w", err)
 	}
-	jobLogger.Info().Msg("uploading stream files complete...")
-	// upload all segments and wait for them to finish, then only upload playlist
-	if err := eg.Wait(); err != nil {
-		return fmt.Errorf("failed to save segments: %w", err)
-	}
-	jobLogger.Info().Msg("uploading playlist files...")
-	if dashManifest != "" {
-		localSegmentPath := filepath.Join(localStreamFolder, dashManifest)
-		finalObjectKey := path.Join(storageStreamFolder, dashManifest)
-		if err := v.SaveSegment(ctx, localSegmentPath, finalObjectKey, dashManifest); err != nil {
-			return fmt.Errorf("failed to save playlists %s: %w", dashManifest, err)
-		}
-	}
-
-	// Upload rendition playlists
-	for _, entry := range mediaPlaylists {
-		fileName := entry
-		localSegmentPath := filepath.Join(localStreamFolder, fileName)
-		finalObjectKey := path.Join(storageStreamFolder, fileName)
-		if err := v.SaveSegment(ctx, localSegmentPath, finalObjectKey, fileName); err != nil {
-			return fmt.Errorf("failed to save playlists %s: %w", fileName, err)
-		}
-	}
-
-	// Upload master playlist LAST
-	if masterPlaylist != "" {
-		localSegmentPath := filepath.Join(localStreamFolder, masterPlaylist)
-		finalObjectKey := path.Join(storageStreamFolder, masterPlaylist)
-		if err := v.SaveSegment(ctx, localSegmentPath, finalObjectKey, masterPlaylist); err != nil {
-			return fmt.Errorf("failed to save playlists %s: %w", masterPlaylist, err)
-		}
-	}
-
-	jobLogger.Info().Dur("duration", time.Since(uploadStart)).Msg("uploading playlist and stream files complete")
+	jobLogger.Info().Dur("duration", time.Since(uploadStart)).Msg("stream upload complete")
 	return nil
 }
 
-func (v *VideoService) SaveSegment(ctx context.Context, srcPath, destKey, fileName string) error {
-	file, err := os.Open(srcPath)
+func (v *VideoService) uploadFile(ctx context.Context, localDir, objectKey, fileName string) error {
+	file, err := os.Open(filepath.Join(localDir, fileName))
 	if err != nil {
-		return err
+		return fmt.Errorf("open %s: %w", fileName, err)
 	}
 	defer file.Close()
-	contentType := media.ContentTypeFromExtension(fileName)
-	meta := media.FileMetaData{
-		Filename:    fileName,
-		ContentType: contentType,
-	}
-	// saveSegment will use saveStream
-	_, err = v.Storage.SaveStream(ctx, destKey, file, meta)
+	// uploadFile will use saveStream
+	_, err = v.Storage.SaveStream(ctx, objectKey, file)
 	if err != nil {
 		return fmt.Errorf("storage save of segment failed: %w", err)
 	}
@@ -204,24 +172,25 @@ func (v *VideoService) SaveSegment(ctx context.Context, srcPath, destKey, fileNa
 
 func (v *VideoService) Upload(ctx context.Context, file io.Reader, meta media.FileMetaData) (*media.MediaObject, error) {
 	videoID := uuid.NewString()
-	
+
 	uploadLogger := v.Logger.With().Str("video_id", videoID).Logger()
 	uploadLogger.Info().Msg("uploading the raw file to minio raw bucket...")
-	
+
 	rawUploadContext, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	keys := v.Layout.ForVideo(videoID)
 	// videos/year/month/videoid/raw.mp4
-	rawObjectKey := v.generateStorageSourceKey(videoID)
-	
+	rawObjectKey := keys.RawObjectKey
+	// videos/2026/06/video_uuid/master.m3u8
+	playlistKey := keys.PlaylistKey
 	uploadStart := time.Now()
-	size, err := v.Storage.SaveRaw(rawUploadContext, rawObjectKey, file, media.FileMetaData{})
+	size, err := v.Storage.SaveRaw(rawUploadContext, rawObjectKey, file)
 	if err != nil {
 		return nil, fmt.Errorf("raw video storage save failed: %w", err)
 	}
-	
+
 	uploadLogger.Info().Float64("size_mb", float64(size)/float64(1024*1024)).Dur("duration", time.Since(uploadStart)).Msg("raw file uploaded successfully")
-	// videos/2026/06/video_uuid/master.m3u8
-	playlistKey := v.generateStorageStreamKey(videoID)
+
 	playBackURL, err := v.Delivery.URL(ctx, playlistKey)
 	if err != nil {
 		// os.Remove(tempSourcePath)
@@ -230,6 +199,7 @@ func (v *VideoService) Upload(ctx context.Context, file io.Reader, meta media.Fi
 	job := jobs.TranscodeJob{
 		VideoID:          videoID,
 		StorageSourceKey: rawObjectKey,
+		PlaylistKey:      keys.PlaylistKey,
 	}
 	queueCtx, queueCancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer queueCancel()

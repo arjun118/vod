@@ -13,6 +13,7 @@ type Config struct {
 	RawBucketName         string
 	StreamsBucketName     string
 	RedisAddr             string
+	DatabaseURL           string
 	NginxDeliveryEndpoint string
 	MaxTranscodeWorkers   int
 	TranscodeQueueName    string
@@ -30,6 +31,7 @@ func Load() *Config {
 		NginxDeliveryEndpoint: getEnv("NGINX_DELIVERY_ENDPOINT", "localhost:8080/media"),
 		MaxTranscodeWorkers:   getEnvInt("MAX_TRANSCODE_WORKERS", 5),
 		TranscodeQueueName:    getEnv("TRANSCODE_QUEUE_NAME", "transcode_queue"),
+		DatabaseURL:           getEnv("DATABASE_URL", "postgres://vod:vod@postgres:5432/vod?sslmode=disable"),
 	}
 }
 

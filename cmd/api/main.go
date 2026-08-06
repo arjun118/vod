@@ -37,7 +37,7 @@ func main() {
 	storageProvider := minio.NewStorage(minioClient, cfg.RawBucketName, cfg.StreamsBucketName)
 	deliverProvider := delivery.NewMinioDelivery(cfg.StreamsBucketName, cfg.NginxDeliveryEndpoint)
 	var err error
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 
 		err = storageProvider.EnsureBuckets(context.Background())
 

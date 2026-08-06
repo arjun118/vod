@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/arjun118/fileupload/internal/jobs"
 	"github.com/arjun118/fileupload/internal/media"
 	"github.com/arjun118/fileupload/internal/queue"
+	"github.com/arjun118/fileupload/internal/transcode"
 	"github.com/arjun118/fileupload/internal/transcoder"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -196,7 +196,7 @@ func (v *VideoService) Upload(ctx context.Context, file io.Reader, meta media.Fi
 		// os.Remove(tempSourcePath)
 		return nil, fmt.Errorf("failed to generate playback URL: %w", err)
 	}
-	job := jobs.TranscodeJob{
+	job := transcode.TranscodeJob{
 		VideoID:          videoID,
 		StorageSourceKey: rawObjectKey,
 		PlaylistKey:      keys.PlaylistKey,

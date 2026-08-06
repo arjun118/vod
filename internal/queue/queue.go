@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/arjun118/fileupload/internal/jobs"
+	"github.com/arjun118/fileupload/internal/transcode"
 	"github.com/redis/go-redis/v9"
 )
 
 type Queue interface {
-	Publish(ctx context.Context, job jobs.TranscodeJob) error
-	Consume(ctx context.Context) (*jobs.TranscodeJob, error)
+	Publish(ctx context.Context, job transcode.TranscodeJob) error
+	Consume(ctx context.Context) (*transcode.TranscodeJob, error)
 }
 
 type RedisQueue struct {
@@ -26,7 +26,7 @@ func NewRedisQueue(client *redis.Client, queueName string) *RedisQueue {
 	}
 }
 
-func (rq *RedisQueue) Publish(ctx context.Context, job jobs.TranscodeJob) error {
+func (rq *RedisQueue) Publish(ctx context.Context, job transcode.TranscodeJob) error {
 	payload, err := json.Marshal(job)
 	if err != nil {
 		return fmt.Errorf("failed to marshall job: %w", err)
@@ -38,13 +38,13 @@ func (rq *RedisQueue) Publish(ctx context.Context, job jobs.TranscodeJob) error 
 	return nil
 }
 
-func (rq *RedisQueue) Consume(ctx context.Context) (*jobs.TranscodeJob, error) {
+func (rq *RedisQueue) Consume(ctx context.Context) (*transcode.TranscodeJob, error) {
 	result, err := rq.client.BLPop(ctx, 0, rq.queueName).Result()
 	if err != nil {
 		return nil, err
 	}
 
-	var job jobs.TranscodeJob
+	var job transcode.TranscodeJob
 	if err := json.Unmarshal([]byte(result[1]), &job); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal job: %w", err)
 	}

@@ -31,7 +31,7 @@ func (r *Repository) Create(ctx context.Context, db database.DBTX, event *Event)
 	values ($1,$2,$3)
 	returning id
 	`
-	args := []any{event.AggregateID, event.EventType, event.Payload}
+	args := []any{event.AggregateID, string(event.EventType), event.Payload}
 	err := db.QueryRow(ctx, query, args...).Scan(&event.ID)
 	if err != nil {
 		return fmt.Errorf("failed create outbox entry: %w", err)
@@ -113,7 +113,7 @@ func (r *Repository) MarkSent(ctx context.Context, db database.DBTX, ids []uuid.
 	tag, err := db.Exec(
 		ctx,
 		query,
-		EventSent,
+		StatusSent,
 		ids,
 	)
 

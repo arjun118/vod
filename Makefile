@@ -20,6 +20,10 @@ migrate-version:
 migrate-force:
 	$(MIGRATE) force $(VERSION)
 
+dev-up:
+	docker compose up -d postgres redis minio
+	$(MIGRATE) up
+	docker compose up -d backend-api backend-worker nginx
 
 show:
 	@echo $(DATABASE_URL)

@@ -2,29 +2,38 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/arjun118/fileupload/internal/config"
 	"github.com/arjun118/fileupload/internal/media"
+	"github.com/arjun118/fileupload/internal/outbox"
 	"github.com/arjun118/fileupload/internal/queue"
 	"github.com/arjun118/fileupload/internal/transcode"
 	"github.com/arjun118/fileupload/internal/transcoder"
+	"github.com/arjun118/fileupload/internal/video"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
 )
 
 type VideoService struct {
-	Transcoder *transcoder.Transcoder
-	Storage    media.StorageProvider
-	Delivery   media.DeliveryProvider
-	Queue      queue.Queue
-	Logger     zerolog.Logger
-	Layout     *media.StorageLayout
-	Provider   string
+	Transcoder    *transcoder.Transcoder
+	Storage       media.StorageProvider
+	Delivery      media.DeliveryProvider
+	Queue         queue.Queue
+	Logger        zerolog.Logger
+	Layout        *media.StorageLayout
+	DB            *pgxpool.Pool
+	VideoRepo     *video.Repository
+	TranscodeRepo *transcode.Repository
+	OutboxRepo    *outbox.Repository
+	Provider      string
 }
 
 type transcodeOutput struct {
@@ -100,15 +109,19 @@ func (v *VideoService) WorkDir(videoID string) string {
 	return filepath.Join("/tmp/jobs", videoID)
 }
 
-func NewVideoService(storage media.StorageProvider, delivery media.DeliveryProvider, q queue.Queue, logger zerolog.Logger, l *media.StorageLayout, provider string) *VideoService {
+func NewVideoService(storage media.StorageProvider, delivery media.DeliveryProvider, db *pgxpool.Pool, q queue.Queue, logger zerolog.Logger, l *media.StorageLayout, videoRepo *video.Repository, transcodeRepo *transcode.Repository, outboxRepo *outbox.Repository, provider string) *VideoService {
 	svc := &VideoService{
-		Transcoder: transcoder.New(),
-		Storage:    storage,
-		Delivery:   delivery,
-		Queue:      q,
-		Logger:     logger,
-		Provider:   provider,
-		Layout:     l,
+		Transcoder:    transcoder.New(),
+		Storage:       storage,
+		Delivery:      delivery,
+		Queue:         q,
+		Logger:        logger,
+		Provider:      provider,
+		DB:            db,
+		VideoRepo:     videoRepo,
+		TranscodeRepo: transcodeRepo,
+		OutboxRepo:    outboxRepo,
+		Layout:        l,
 	}
 	return svc
 }
@@ -171,6 +184,7 @@ func (v *VideoService) uploadFile(ctx context.Context, localDir, objectKey, file
 }
 
 func (v *VideoService) Upload(ctx context.Context, file io.Reader, meta media.FileMetaData) (*media.MediaObject, error) {
+	cfg := config.Load()
 	videoID := uuid.NewString()
 
 	uploadLogger := v.Logger.With().Str("video_id", videoID).Logger()
@@ -196,15 +210,61 @@ func (v *VideoService) Upload(ctx context.Context, file io.Reader, meta media.Fi
 		// os.Remove(tempSourcePath)
 		return nil, fmt.Errorf("failed to generate playback URL: %w", err)
 	}
-	job := transcode.TranscodeJob{
-		VideoID:          videoID,
-		StorageSourceKey: rawObjectKey,
-		PlaylistKey:      keys.PlaylistKey,
+	// write to
+	// begin tx
+	// 1. videos table
+	// 2. transcode jobs table
+	// 3. outbox table
+	// commit
+	tx, err := v.DB.Begin(ctx)
+	if err != nil {
+		// v.Logger.Error().Err(err).Msg("failed to initiate db transaction")
+		return nil, fmt.Errorf("failed to initiate db transaction : %w", err)
 	}
-	queueCtx, queueCancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer queueCancel()
-	if err := v.Queue.Publish(queueCtx, job); err != nil {
-		return nil, fmt.Errorf("failed to queue transcode job :%w", err)
+	var video video.Video
+	video.SizeBytes = size
+	video.StorageKey = keys.RawObjectKey
+	video.PlaylistKey = keys.PlaylistKey
+	video.PlaybackURL = playBackURL
+	// store video
+	err = v.VideoRepo.Create(ctx, tx, &video)
+	if err != nil {
+		tx.Rollback(ctx)
+		return nil, fmt.Errorf("failed to store video data: %w", err)
+	}
+
+	// store transode job
+	var jobModel transcode.Job
+	jobModel.MaxAttempts = cfg.MaxTranscodeAttempts
+	jobModel.VideoID = video.ID
+	err = v.TranscodeRepo.Create(ctx, tx, &jobModel)
+	if err != nil {
+		tx.Rollback(ctx)
+		return nil, fmt.Errorf("failed to store transcode job: %w", err)
+	}
+	// store outbox record
+	transcodeJob := transcode.TranscodeJob{
+		VideoID:          video.ID.String(),
+		StorageSourceKey: video.StorageKey,
+		PlaylistKey:      video.PlaylistKey,
+	}
+	payload, err := json.Marshal(transcodeJob)
+	if err != nil {
+		tx.Rollback(ctx)
+		return nil, fmt.Errorf("failed to create outbox event : %w", err)
+	}
+	var event outbox.Event
+	event.EventType = outbox.EventTranscodeRequest
+	event.AggregateID = jobModel.ID
+	event.Payload = payload
+	err = v.OutboxRepo.Create(ctx, tx, &event)
+	if err != nil {
+		tx.Rollback(ctx)
+		return nil, fmt.Errorf("failed to store outbox record: %w", err)
+	}
+	err = tx.Commit(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write video metadata and job details to db: %w", err)
 	}
 	return &media.MediaObject{
 		ID:          videoID,

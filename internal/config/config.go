@@ -16,7 +16,11 @@ type Config struct {
 	DatabaseURL           string
 	NginxDeliveryEndpoint string
 	MaxTranscodeWorkers   int
-	TranscodeQueueName    string
+	MaxTranscodeAttempts  int
+	// queue specific configurations
+	TranscodeStreamName   string
+	TranscodeGroupName    string
+	TranscodeConsumerName string
 }
 
 func Load() *Config {
@@ -30,7 +34,10 @@ func Load() *Config {
 		RedisAddr:             getEnv("REDIS_ADDR", "localhost:6379"),
 		NginxDeliveryEndpoint: getEnv("NGINX_DELIVERY_ENDPOINT", "localhost:8080/media"),
 		MaxTranscodeWorkers:   getEnvInt("MAX_TRANSCODE_WORKERS", 5),
-		TranscodeQueueName:    getEnv("TRANSCODE_QUEUE_NAME", "transcode_queue"),
+		MaxTranscodeAttempts:  getEnvInt("MAX_TRANSCODE_ATTEMPTS", 3),
+		TranscodeStreamName:   getEnv("TRANSCODE_STREAM_NAME", "transcode_jobs"),
+		TranscodeGroupName:    getEnv("TRANSCODE_GROUP_NAME", "transcoders"),
+		TranscodeConsumerName: getEnv("TRANSCODE_CONSUMER_NAME", "reader-1"),
 		DatabaseURL:           getEnv("DATABASE_URL", "postgres://vod:vod@postgres:5432/vod?sslmode=disable"),
 	}
 }

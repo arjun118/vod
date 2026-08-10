@@ -180,3 +180,35 @@ WHERE
 
 	return nil
 }
+
+func (r *Repository) GetExecutionInfo(
+	ctx context.Context,
+	db database.DBTX,
+	jobID string,
+) (*ExecutionInfo, error) {
+	var execInfo ExecutionInfo
+	const query = `
+	select t.job_id,v.id, storage_key, playlist_key, t.status, t.attempts, t.max_attempts
+	from videos v
+	inner join ( select id as job_id, video_id, status,attempts, max_attempts from transcode_jobs
+	where id=$1
+	) t
+	on v.id= t.video_id
+	`
+
+	// SourceKey   string
+	// PlaylistKey string
+	err := db.QueryRow(ctx, query, jobID).Scan(
+		&execInfo.Job.ID,
+		&execInfo.Job.VideoID,
+		&execInfo.SourceKey,
+		&execInfo.PlaylistKey,
+		&execInfo.Job.Status,
+		&execInfo.Job.Attempts,
+		&execInfo.Job.MaxAttempts,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get job execution info: %w", err)
+	}
+	return &execInfo, nil
+}

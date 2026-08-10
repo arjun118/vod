@@ -7,7 +7,7 @@ import (
 )
 
 type TranscodeJob struct {
-	VideoID string `json:"videoid"`
+	VideoID string `json:"video_id"`
 
 	// Object key of the uploaded source video.
 	StorageSourceKey string `json:"source_key"`
@@ -40,19 +40,26 @@ const (
 )
 
 type Job struct {
-	ID          uuid.UUID
-	VideoID     uuid.UUID
-	Status      Status
-	Attempts    int
-	MaxAttempts int
+	ID          uuid.UUID `json:"id"`
+	VideoID     uuid.UUID `json:"videos_id"`
+	Status      Status    `json:"status"`
+	Attempts    int       `json:"attempts"`
+	MaxAttempts int       `json:"max_attempts"`
 
-	ErrorMessage *string
-	ProcessedBy  *string
+	ErrorMessage *string `json:"error_message"`
+	ProcessedBy  *string `json:"processed_by"`
 
-	StartedAt  *time.Time
-	FinishedAt *time.Time
-	CreatedAt  *time.Time
-	UpdatedAt  *time.Time
+	StartedAt  *time.Time `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+	CreatedAt  *time.Time `json:"created_at"`
+	UpdatedAt  *time.Time `json:"updated_at"`
+}
+
+type ExecutionInfo struct {
+	Job Job
+
+	SourceKey   string
+	PlaylistKey string
 }
 
 func (j Job) CanRetry() bool {

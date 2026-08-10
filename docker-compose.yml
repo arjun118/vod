@@ -20,20 +20,19 @@
         retries: 10
         start_period: 5s
 
-
     migrate:
       image: migrate/migrate:v4.18.3
-
       depends_on:
         postgres:
           condition: service_healthy
-
-      profiles:
-        - migrate
-
-
       volumes:
         - ./migrations:/migrations
+      command:
+        [
+          "-path", "/migrations",
+          "-database", "postgres://vod:vod@postgres:5432/vod?sslmode=disable",
+          "up"
+        ]
 
     minio:
       image: quay.io/minio/minio
@@ -79,6 +78,8 @@
         - DATABASE_URL=postgres://vod:vod@postgres:5432/vod?sslmode=disable
       container_name: backend-api
       depends_on:
+          migrate:
+             condition: service_completed_successfully
           postgres:
             condition: service_healthy
           minio:
@@ -94,7 +95,10 @@
       environment:
         - REDIS_ADDR=redis:6379
         - MINIO_ENDPOINT=minio:9000
+        - DATABASE_URL=postgres://vod:vod@postgres:5432/vod?sslmode=disable
       depends_on:
+        migrate:
+          condition: service_completed_successfully
         postgres:
           condition: service_healthy
         minio:

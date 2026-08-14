@@ -37,6 +37,8 @@ const (
 	StatusProcessing Status = "processing"
 	StatusCompleted  Status = "completed"
 	StatusFailed     Status = "failed"
+	StatusDead       Status = "dead"
+	StatusStale      Status = "stale"
 )
 
 type Job struct {
@@ -60,6 +62,14 @@ type ExecutionInfo struct {
 
 	SourceKey   string
 	PlaylistKey string
+}
+
+func (j Job) IsDead() bool {
+	return j.Status == StatusDead
+}
+
+func (j Job) IsStale() bool {
+	return j.Status == StatusStale
 }
 
 func (j Job) CanRetry() bool {
@@ -104,10 +114,15 @@ func (j *Job) MarkFailed(err error) {
 	}
 }
 
-func (j *Job) ResetForRetry() {
+func (j *Job) MarkDead(err error) {
 	now := time.Now()
 
-	j.Status = StatusPending
+	j.Status = StatusDead
+	j.FinishedAt = &now
 	j.UpdatedAt = &now
-	j.ErrorMessage = nil
+
+	if err != nil {
+		msg := err.Error()
+		j.ErrorMessage = &msg
+	}
 }

@@ -156,6 +156,7 @@ func BuildArgs(plan *EncodingPlan) []string {
 		)
 	}
 	args = append(args,
+		"-threads", "3",
 		"-preset", "medium",
 		"-profile:v", "high",
 		"-pix_fmt", "yuv420p",
@@ -270,10 +271,11 @@ func Run(ctx context.Context, plan *EncodingPlan) error {
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		// Only log the output if ffmpeg fails
-		return fmt.Errorf("ffmpeg error: %v, output: %s", err, stderr.String())
+	if err := cmd.Run(); err != nil {
+		return &TranscodeError{
+			Err:    err,
+			Stderr: stderr.String(),
+		}
 	}
 
 	return nil

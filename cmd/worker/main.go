@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -19,37 +20,36 @@ import (
 	"github.com/arjun118/fileupload/internal/outbox"
 	"github.com/arjun118/fileupload/internal/queue"
 	"github.com/arjun118/fileupload/internal/transcode"
+	"github.com/arjun118/fileupload/internal/transcoder"
 	"github.com/arjun118/fileupload/service"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 )
 
-func StartWorkerPool(ctx context.Context, v *service.VideoService, queue queue.Queue, db *pgxpool.Pool, jobs <-chan queue.Message, workerLogger zerolog.Logger, workerWg *sync.WaitGroup, transcodeRepo *transcode.Repository, maxWorkers int) {
+func StartWorkerPool(ctx context.Context, v *service.VideoService, queue queue.Queue, dlq queue.Queue, db *pgxpool.Pool, jobs <-chan queue.Message, workerLogger zerolog.Logger, workerWg *sync.WaitGroup, transcodeRepo *transcode.Repository, maxWorkers int) {
 	for i := range maxWorkers {
 		workerWg.Add(1)
 		go func(workerID string) {
 			defer workerWg.Done()
-
+			workerLoggerSpecific := workerLogger.With().Str("worker_id", workerID).Logger()
 			// Replace log.Printf with structured zerolog Info
-			workerLogger.Info().Str("worker_id", workerID).Msg("starting transcode worker")
+			workerLoggerSpecific.Info().Msg("starting transcode worker")
 
 			for {
 				select {
 				case <-ctx.Done():
-					workerLogger.Info().Str("worker_id", workerID).Msg("worker shutting down (context cancelled)")
+					workerLoggerSpecific.Info().Msg("worker shutting down (context cancelled)")
 					return
 
 				case message, ok := <-jobs:
 					if !ok {
-						workerLogger.Info().Str("worker_id", workerID).Msg("worker shutting down (channel closed)")
+						workerLoggerSpecific.Info().Msg("worker shutting down (channel closed)")
 						return
 					}
 					// Create a sub-logger specifically for this job (attaches video_id and worker_id to all subsequent logs)
-					jobLogger := workerLogger.With().
+					jobLogger := workerLoggerSpecific.With().
 						Str("job_id", message.JobID).
-						Str("worker_id", workerID).
 						Logger()
-
 					jobLogger.Info().Msg("processing video")
 
 					start := time.Now()
@@ -61,18 +61,29 @@ func StartWorkerPool(ctx context.Context, v *service.VideoService, queue queue.Q
 					}
 
 					// proceed basis the status
-					if execInfo.Job.IsCompleted() {
+					if execInfo.Job.IsCompleted() || execInfo.Job.IsDead() {
 						_ = queue.Ack(ctx, message.ID)
-						continue
-					}
-					if execInfo.Job.IsProcessing() {
 						continue
 					}
 					if execInfo.Job.IsFailed() && !execInfo.Job.CanRetry() {
+						// mark job dead
+						execInfo.Job.Status = transcode.StatusDead
+						if err := transcodeRepo.Update(ctx, db, &execInfo.Job); err != nil {
+							jobLogger.Error().Err(err).Str("job_id", execInfo.Job.ID.String()).Msg("failed to mark job dead")
+							continue
+						}
+						// push to dlq
+						if _, err := dlq.Publish(ctx, execInfo.Job.ID.String()); err != nil {
+							jobLogger.Error().
+								Err(err).
+								Msg("failed to publish job to DLQ")
+							continue
+						}
+						// ack
 						_ = queue.Ack(ctx, message.ID)
 						continue
 					}
-
+					//if job  is stale/pending/failed and can retry - process it
 					if err := transcodeRepo.MarkProcessing(ctx, db, execInfo.Job.ID, workerID); err != nil {
 						continue
 					}
@@ -92,23 +103,51 @@ func StartWorkerPool(ctx context.Context, v *service.VideoService, queue queue.Q
 					err = v.ProcessAndSaveHLS(jobCtx, execInfo.Job.VideoID.String(), keys)
 					jobCancel()
 					duration := time.Since(transCodeStart)
+					// transcoding failed for some reason
+					// decide below whether to retry to mark dead
 					if err != nil {
 						jobLogger.Error().
 							Err(err).
 							Dur("duration", duration).
 							Msg("video transcoding failed")
-						if execInfo.Job.CanRetry() {
-							execInfo.Job.ResetForRetry()
-							jobLogger.Warn().
-								Int("attempts", execInfo.Job.Attempts).
-								Int("max_attempts", execInfo.Job.MaxAttempts).
-								Msg("job will be retried")
+						var transErr *transcoder.TranscodeError
+						severity := transcoder.SeverityTransient
+						var errorStr string
+						if errors.As(err, &transErr) {
+							severity = transcoder.ClassifyError(transErr.Err, transErr.Stderr)
+							errorStr = transErr.Stderr
 						} else {
+							severity = transcoder.ClassifyError(err, "")
+							errorStr = transErr.Error()
+						}
+
+						switch severity {
+						case transcoder.SeverityPermanent:
+							// failure is  permanent - no use retrying
+							jobLogger.Error().
+								Str("severity", "permanent").
+								Msg("marking job as permanently failed")
+							// mark dead and push to dlq
+							execInfo.Job.MarkDead(errors.New(errorStr))
+							if err := transcodeRepo.Update(ctx, db, &execInfo.Job); err != nil {
+								jobLogger.Error().Err(err).Str("job_id", execInfo.Job.ID.String()).Msg("failed to mark job dead")
+								continue
+							}
+							if _, err := dlq.Publish(ctx, execInfo.Job.ID.String()); err != nil {
+								jobLogger.Error().
+									Err(err).
+									Msg("failed to publish job to DLQ")
+								continue
+							}
+							_ = queue.Ack(ctx, message.ID)
+							continue
+
+						case transcoder.SeverityTransient:
 							jobLogger.Warn().
-								Int("attempts", execInfo.Job.Attempts).
-								Int("max_attempts", execInfo.Job.MaxAttempts).
-								Msg("max retries exceeded")
-							execInfo.Job.MarkFailed(err)
+								Str("severity", "transient").
+								Msg("transcoding failed with transient error; will retry")
+							// return error so your queue/worker retry mechanism handles it
+							continue
 						}
 					} else {
 						jobLogger.Info().Dur("duration", duration).Msg("video transcoding + stream upload to storage completed successfully")
@@ -117,18 +156,10 @@ func StartWorkerPool(ctx context.Context, v *service.VideoService, queue queue.Q
 					if err := transcodeRepo.Update(ctx, db, &execInfo.Job); err != nil {
 						continue
 					}
-
-					if execInfo.Job.IsFailed() && !execInfo.Job.CanRetry() {
-
-						if err := queue.Ack(ctx, message.ID); err != nil {
-							jobLogger.Error().Err(err).Msg("failed to acknowledge message")
-							continue
-						}
-					}
 					if execInfo.Job.IsCompleted() {
 						if err := queue.Ack(ctx, message.ID); err != nil {
 							jobLogger.Error().Err(err).Msg("failed to acknowledge completed message")
-							continue
+							// continue
 						} else {
 							jobLogger.Info().Dur("duration", time.Since(start)).Msg("job completed end-to-end successfully")
 						}
@@ -147,7 +178,7 @@ func StopWorkerPool(workerWg *sync.WaitGroup) {
 func main() {
 	cfg := config.Load()
 	// setup db connection
-	dbPool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
+	dbPool, err := infra.NewPostgresPool(cfg)
 	baseLogger := logger.New(os.Stderr)
 
 	// create a buffered channel
@@ -173,8 +204,13 @@ func main() {
 	redisClient := infra.NewRedisClient(cfg)
 
 	transcodeQueue := queue.NewRedisQueue(redisClient, cfg.TranscodeStreamName, cfg.TranscodeGroupName, cfg.TranscodeConsumerName)
+
+	transcodeDLQ := queue.NewRedisQueue(redisClient, fmt.Sprintf("%s_dlq", cfg.TranscodeStreamName), fmt.Sprintf("%s_dlq", cfg.TranscodeGroupName), fmt.Sprintf("%s_dlq", cfg.TranscodeConsumerName))
 	if err := transcodeQueue.Init(context.Background()); err != nil {
-		baseLogger.Fatal().Err(err).Msg("failed to initialize redis stream consumer group")
+		baseLogger.Fatal().Err(err).Msg("failed to initialize transcode stream stream and consumer group")
+	}
+	if err := transcodeDLQ.Init(context.Background()); err != nil {
+		baseLogger.Fatal().Err(err).Msg("failed to initialize transcode dlq stream and consumer group")
 	}
 	// Providers
 	storageProvider := minio.NewStorage(minioClient, cfg.RawBucketName, cfg.StreamsBucketName)
@@ -191,7 +227,7 @@ func main() {
 	// start transcode worker pool
 	// ctx context.Context, v *service.VideoService, queue queue.Queue, db *pgxpool.Pool, jobs <-chan queue.Message, workerLogger zerolog.Logger, workerWg *sync.WaitGroup, maxWorkers int
 	workerLogger.Info().Msg("starting transcode worker pool")
-	go StartWorkerPool(ctx, videoService, transcodeQueue, dbPool, jobChannel, workerLogger, &wg, transcodeRepo, cfg.MaxTranscodeWorkers)
+	go StartWorkerPool(ctx, videoService, transcodeQueue, transcodeDLQ, dbPool, jobChannel, workerLogger, &wg, transcodeRepo, cfg.MaxTranscodeWorkers)
 	// defer StopWorkerPool(&wg)
 	// start outbox publisher - [outbox table] -> redis stream
 	workerLogger.Info().Msg("starting outbox publisher loop")
@@ -199,6 +235,7 @@ func main() {
 	// start stream consumer - [from redis stream] -> a buffered channel
 	workerLogger.Info().Msg("starting redis consumer loop")
 	go StartRedisStreamConsumer(ctx, "reader-1", workerLogger, transcodeQueue, jobChannel)
+	go StartRedisPELConsumer(ctx, workerLogger, transcodeQueue, transcodeDLQ, transcodeRepo, dbPool, jobChannel)
 	<-ctx.Done()
 
 	workerLogger.Info().Msg("Shutdown signal received. Waiting for active transcodes to complete...")

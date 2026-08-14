@@ -24,7 +24,6 @@ import (
 	"github.com/arjun118/fileupload/service"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
@@ -41,7 +40,7 @@ func main() {
 	cfg := config.Load()
 
 	// establish db connection
-	dbPool, dberr := pgxpool.New(context.Background(), cfg.DatabaseURL)
+	dbPool, dberr := infra.NewPostgresPool(cfg)
 	if dberr != nil {
 		apiLogger.Error().Err(dberr).Msg("failed to establish db connection")
 		return

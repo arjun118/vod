@@ -114,7 +114,7 @@ SET
 	updated_at = NOW()
 WHERE
 	id = $3
-	AND status = $4;
+	 AND status IN ($4, $5, $6);
 `
 
 	tag, err := db.Exec(
@@ -124,6 +124,8 @@ WHERE
 		workerID,
 		jobID,
 		StatusPending,
+		StatusStale,
+		StatusFailed,
 	)
 
 	if err != nil {

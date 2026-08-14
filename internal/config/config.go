@@ -5,6 +5,13 @@ import (
 	"strconv"
 )
 
+type DBConfig struct {
+	DATABASE_URL string
+	MaxOpenConns int
+	MaxIdleConns int
+	MaxIdleTime  string
+}
+
 type Config struct {
 	MinioEndpoint         string
 	MinioAccessKey        string
@@ -13,7 +20,6 @@ type Config struct {
 	RawBucketName         string
 	StreamsBucketName     string
 	RedisAddr             string
-	DatabaseURL           string
 	NginxDeliveryEndpoint string
 	MaxTranscodeWorkers   int
 	MaxTranscodeAttempts  int
@@ -21,6 +27,7 @@ type Config struct {
 	TranscodeStreamName   string
 	TranscodeGroupName    string
 	TranscodeConsumerName string
+	DB                    DBConfig
 }
 
 func Load() *Config {
@@ -33,15 +40,19 @@ func Load() *Config {
 		StreamsBucketName:     getEnv("MINIO_STREAMS_BUCKET", "streams"),
 		RedisAddr:             getEnv("REDIS_ADDR", "localhost:6379"),
 		NginxDeliveryEndpoint: getEnv("NGINX_DELIVERY_ENDPOINT", "localhost:8080/media"),
-		MaxTranscodeWorkers:   getEnvInt("MAX_TRANSCODE_WORKERS", 5),
+		MaxTranscodeWorkers:   getEnvInt("MAX_TRANSCODE_WORKERS", 2),
 		MaxTranscodeAttempts:  getEnvInt("MAX_TRANSCODE_ATTEMPTS", 3),
 		TranscodeStreamName:   getEnv("TRANSCODE_STREAM_NAME", "transcode_jobs"),
 		TranscodeGroupName:    getEnv("TRANSCODE_GROUP_NAME", "transcoders"),
 		TranscodeConsumerName: getEnv("TRANSCODE_CONSUMER_NAME", "reader-1"),
-		DatabaseURL:           getEnv("DATABASE_URL", "postgres://vod:vod@postgres:5432/vod?sslmode=disable"),
+		DB: DBConfig{
+			DATABASE_URL: getEnv("DATABASE_URL", "postgres://vod:vod@postgres:5432/vod?sslmode=disable"),
+			MaxOpenConns: getEnvInt("DB_MAX_OPEN_CONNS", 25),
+			MaxIdleConns: getEnvInt("DB_MAX_IDLE_CONNS", 25),
+			MaxIdleTime:  getEnv("DB_MAX_IDLE_TIME", "15m"),
+		},
 	}
 }
-
 func getEnvInt(key string, fallback int) int {
 	if value, exists := os.LookupEnv(key); exists {
 		if i, err := strconv.Atoi(value); err == nil {

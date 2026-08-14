@@ -190,15 +190,15 @@ func (v *VideoService) Upload(ctx context.Context, file io.Reader, meta media.Fi
 	uploadLogger := v.Logger.With().Str("video_id", videoID).Logger()
 	uploadLogger.Info().Msg("uploading the raw file to minio raw bucket...")
 
-	rawUploadContext, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
+	// rawUploadContext, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// defer cancel()
 	keys := v.Layout.ForVideo(videoID)
 	// videos/year/month/videoid/raw.mp4
 	rawObjectKey := keys.RawObjectKey
 	// videos/2026/06/video_uuid/master.m3u8
 	playlistKey := keys.PlaylistKey
 	uploadStart := time.Now()
-	size, err := v.Storage.SaveRaw(rawUploadContext, rawObjectKey, file)
+	size, err := v.Storage.SaveRaw(ctx, rawObjectKey, file)
 	if err != nil {
 		return nil, fmt.Errorf("raw video storage save failed: %w", err)
 	}
@@ -226,6 +226,7 @@ func (v *VideoService) Upload(ctx context.Context, file io.Reader, meta media.Fi
 	video.StorageKey = keys.RawObjectKey
 	video.PlaylistKey = keys.PlaylistKey
 	video.PlaybackURL = playBackURL
+	video.UploadStatus = "success"
 	// store video
 	err = v.VideoRepo.Create(ctx, tx, &video)
 	if err != nil {

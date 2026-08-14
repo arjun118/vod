@@ -12,6 +12,7 @@ import (
 type Queue interface {
 	Publish(ctx context.Context, jobID string) (string, error)
 	Consume(ctx context.Context, limit int) ([]Message, error)
+	ClaimStaleJobs(ctx context.Context, idleTime time.Duration, limit int) ([]PendingMessage, error)
 	Ack(ctx context.Context, id string) error
 }
 
@@ -110,4 +111,77 @@ func (rq *RedisQueue) Ack(ctx context.Context, id string) error {
 		return fmt.Errorf("ack job %s: %w", id, err)
 	}
 	return nil
+}
+
+func (rq *RedisQueue) ClaimStaleJobs(
+	ctx context.Context,
+	idleTime time.Duration,
+	limit int,
+) ([]PendingMessage, error) {
+
+	// Step 1: inspect pending messages and get their actual idle time
+	pending, err := rq.client.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: rq.streamName,
+		Group:  rq.groupName,
+		Idle:   idleTime, // only messages idle at least this long
+		Start:  "-",
+		End:    "+",
+		Count:  int64(limit),
+	}).Result()
+	if err != nil {
+		return nil, fmt.Errorf("xpedingext: %w", err)
+	}
+
+	if len(pending) == 0 {
+		return nil, nil
+	}
+
+	// Step 2: reclaim ownership of those messages
+	startID := pending[0].ID
+
+	msgs, _, err := rq.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+		Stream:   rq.streamName,
+		Group:    rq.groupName,
+		Consumer: rq.consumerName,
+		MinIdle:  idleTime,
+		Start:    startID,
+		Count:    int64(limit),
+	}).Result()
+	if err != nil {
+		return nil, fmt.Errorf("xautoclaim: %w", err)
+	}
+
+	// Build a lookup of idle times by message ID
+	idleByID := make(map[string]redis.XPendingExt, len(pending))
+	for _, p := range pending {
+		idleByID[p.ID] = p
+	}
+
+	claimed := make([]PendingMessage, 0, len(msgs))
+
+	for _, msg := range msgs {
+
+		v, ok := msg.Values["job_id"]
+		if !ok {
+			continue
+		}
+
+		jobID, ok := v.(string)
+		if !ok {
+			continue
+		}
+
+		p := idleByID[msg.ID]
+
+		claimed = append(claimed, PendingMessage{
+			Message: Message{
+				ID:    msg.ID,
+				JobID: jobID,
+			},
+			Idle:     p.Idle,
+			Consumer: p.Consumer,
+		})
+	}
+
+	return claimed, nil
 }

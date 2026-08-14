@@ -20,10 +20,10 @@ func (r *Repository) Create(
 	v *Video,
 ) error {
 	sqlString := `
-	INSERT INTO videos (title, original_filename,size_bytes, storage_key, playlist_key, playback_url) values
-	($1,$2,$3,$4,$5,$6) returning id, created_at,updated_at
+	INSERT INTO videos (title, original_filename,size_bytes, storage_key, upload_status,playlist_key, playback_url) values
+	($1,$2,$3,$4,$5,$6,$7) returning id, created_at,updated_at
 	`
-	args := []any{v.Title, v.OriginalFilename, v.SizeBytes, v.StorageKey, v.PlaylistKey, v.PlaybackURL}
+	args := []any{v.Title, v.OriginalFilename, v.SizeBytes, v.StorageKey, v.UploadStatus, v.PlaylistKey, v.PlaybackURL}
 	err := db.QueryRow(ctx, sqlString, args...).Scan(&v.ID, &v.CreatedAt, &v.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("failed to create record for video: %w", err)

@@ -60,9 +60,10 @@ func StartRedisPELConsumer(
 	db *pgxpool.Pool,
 	jobs chan<- queue.Message,
 ) {
-	minIdleTime := 15 * time.Minute
-	// every 5 mins we will run
-	ticker := time.NewTicker(5 * time.Minute)
+	// only get those who has min idle time of 10 mintues
+	minIdleTime := 10 * time.Minute
+	// every 2 mins we will run get such records from pel
+	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 
 	for {
@@ -72,7 +73,7 @@ func StartRedisPELConsumer(
 
 		case <-ticker.C:
 
-			// Claim messages that have been idle in PEL for at least 20 minute.
+			// Claim messages that have been idle in PEL for at least 5 minute.
 			// Real retry eligibility is checked below using retryBackoff().
 			msgs, err := queue.ClaimStaleJobs(ctx, minIdleTime, 100)
 			if err != nil {
@@ -133,9 +134,10 @@ func StartRedisPELConsumer(
 
 					required := retryBackoff(job.Attempts)
 
-					if msg.Idle < required {
+					if msg.Idle < time.Duration(required.Milliseconds()) {
 						logger.Info().
 							Str("job_id", job.ID.String()).
+							Int("attempts", job.Attempts).
 							Dur("idle", msg.Idle).
 							Dur("required", required).
 							Msg("retry backoff not reached yet")

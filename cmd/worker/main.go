@@ -118,7 +118,7 @@ func StartWorkerPool(ctx context.Context, v *service.VideoService, queue queue.Q
 							errorStr = transErr.Stderr
 						} else {
 							severity = transcoder.ClassifyError(err, "")
-							errorStr = transErr.Error()
+							errorStr = err.Error()
 						}
 
 						switch severity {
@@ -143,6 +143,11 @@ func StartWorkerPool(ctx context.Context, v *service.VideoService, queue queue.Q
 							continue
 
 						case transcoder.SeverityTransient:
+							execInfo.Job.MarkFailed(errors.New(errorStr))
+							if err := transcodeRepo.Update(ctx, db, &execInfo.Job); err != nil {
+								jobLogger.Error().Err(err).Str("job_id", execInfo.Job.ID.String()).Msg("failed to mark job failed")
+								continue
+							}
 							jobLogger.Warn().
 								Str("severity", "transient").
 								Msg("transcoding failed with transient error; will retry")

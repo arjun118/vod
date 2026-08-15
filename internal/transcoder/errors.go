@@ -46,8 +46,15 @@ func ClassifyError(err error, stderr string) ErrorSeverity {
 
 	permanentPatterns := []string{
 		"invalid data found when processing input",
+		"moov atom not found",
 		"decoder not found",
-		"unsupported codec",
+		"unknown decoder",
+		"encoder not found",
+		"unknown encoder",
+		"no such filter",
+		"matches no streams",
+		"unable to find a suitable output format",
+		"invalid argument",
 	}
 
 	for _, p := range permanentPatterns {
